@@ -67,6 +67,17 @@ impl VerusRPC {
 }
 
 async fn handle_req(req: Request<Body>, rpc: Arc<VerusRPC>) -> Result<Response<Body>, hyper::Error> {
+
+    // Handle CORS preflight (OPTIONS) request
+    if req.method() == hyper::Method::OPTIONS {
+        let mut response = Response::new(Body::empty());
+        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST".parse().unwrap());
+        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_HEADERS, "Content-Type, Authorization, Accept".parse().unwrap());
+        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_MAX_AGE, "3600".parse().unwrap());
+        return Ok(response);
+    }
+
     // Maximum allowed content length (in bytes)
     const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 10; // 1 MiB, adjust as needed
 
@@ -88,10 +99,23 @@ async fn handle_req(req: Request<Body>, rpc: Arc<VerusRPC>) -> Result<Response<B
         Ok(req_body) => rpc.handle(req_body),
         Err(_) => Err(RpcError { code: -32700, message: "Parse error".into(), data: None }),
     };
-    match result {
-        Ok(res) => Ok(Response::new(Body::from(json!({"result": res}).to_string()))),
-        Err(err) => Ok(Response::new(Body::from(json!({"error": { "code": err.code, "message": err.message }}).to_string()))),
-    }
+    // Process the CORS headers
+    let mut response = match result {
+        Ok(res) => Response::new(Body::from(json!({"result": res}).to_string())),
+        Err(err) => Response::new(Body::from(json!({"error": { "code": err.code, "message": err.message }}).to_string())),
+    };
+
+    // Add CORS headers
+    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, PUT, OPTIONS, POST".parse().unwrap());
+    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_HEADERS, "Content-Type, Authorization, Accept".parse().unwrap());
+    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_MAX_AGE, "3600".parse().unwrap());
+
+    // Set the Referrer Policy header
+    response.headers_mut().insert(hyper::header::REFERRER_POLICY, "origin-when-cross-origin".parse().unwrap());
+
+    Ok(response)
+
 }
 
 #[tokio::main]
