@@ -34,6 +34,20 @@ pub fn is_method_allowed(method: &str, params: &[Box<RawValue>]) -> bool {
                 _ => false,
             }
         },
+        "signdata" => {
+            if params.len() != 1 {
+                return false;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(&params[0].to_string()) {
+                if let Value::Object(obj) = value {
+                    !obj.contains_key("address")
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        },
         "recoveridentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["obj", "bool", "bool", "float", "str"]),
         "registeridentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["obj", "bool", "float", "str"]),
         "revokeidentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["str", "bool", "bool", "float", "str"]),
