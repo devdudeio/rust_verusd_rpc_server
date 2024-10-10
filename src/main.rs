@@ -79,7 +79,7 @@ async fn handle_req(req: Request<Body>, rpc: Arc<VerusRPC>) -> Result<Response<B
     }
 
     // Maximum allowed content length (in bytes)
-    const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 10; // 1 MiB, adjust as needed
+    const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 50; // 50 MiB, adjust as needed
 
     if let Some(content_length) = req.headers().get(hyper::header::CONTENT_LENGTH) {
         if let Ok(content_length) = content_length.to_str().unwrap_or("").parse::<u64>() {
