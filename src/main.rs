@@ -148,11 +148,7 @@ impl VerusRPC {
         // Convert Vec<Box<RawValue>> into a single RawValue containing the params array
         let params_array_str = format!(
             "[{}]",
-            params
-                .iter()
-                .map(|p| p.get())
-                .collect::<Vec<_>>()
-                .join(",")
+            params.iter().map(|p| p.get()).collect::<Vec<_>>().join(",")
         );
         let params_raw = RawValue::from_string(params_array_str).map_err(|e| {
             error!("Failed to serialize params: {}", e);
@@ -495,7 +491,11 @@ async fn handle_req(
                 .parse()
                 .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
         );
-        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin.as_ref());
+        add_cors_and_security_headers(
+            &mut response,
+            &server_config.cors_origins,
+            request_origin.as_ref(),
+        );
         return Ok(response);
     }
 
@@ -509,7 +509,11 @@ async fn handle_req(
                 .parse()
                 .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
         );
-        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin.as_ref());
+        add_cors_and_security_headers(
+            &mut response,
+            &server_config.cors_origins,
+            request_origin.as_ref(),
+        );
         return Ok(response);
     }
 
@@ -650,7 +654,11 @@ async fn handle_req(
             .parse()
             .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
     );
-    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin.as_ref());
+    add_cors_and_security_headers(
+        &mut response,
+        &server_config.cors_origins,
+        request_origin.as_ref(),
+    );
     Ok(response)
 }
 
