@@ -18,11 +18,14 @@ A high-performance, secure RPC proxy server for Verus blockchain nodes written i
 - **Async I/O**: Built on Tokio for maximum concurrency
 
 ### Operations
-- **Health Checks**: `/health` endpoint for monitoring and load balancers
+- **Health Checks**: `/health` endpoint for liveness probes
+- **Readiness Checks**: `/ready` endpoint for Kubernetes readiness probes
+- **Docker Health Monitoring**: Built-in HEALTHCHECK directive
 - **Structured Logging**: Request tracing with unique request IDs
 - **Graceful Shutdown**: SIGTERM/SIGINT handling with connection draining
 - **Environment Variables**: Full configuration via environment variables
 - **Docker Support**: Production-ready Docker image with security best practices
+- **Security Validation**: Automatic configuration security checks on startup
 
 ## Quick Start
 
@@ -160,7 +163,7 @@ curl -X POST http://localhost:8080 \
   }'
 ```
 
-### Health Check
+### Health Check (Liveness)
 
 ```bash
 curl http://localhost:8080/health
@@ -171,6 +174,31 @@ curl http://localhost:8080/health
 {
   "status": "healthy",
   "rpc": "connected"
+}
+```
+
+### Readiness Check
+
+The `/ready` endpoint is designed for Kubernetes readiness probes. It returns 200 when ready, 503 when not ready:
+
+```bash
+curl http://localhost:8080/ready
+```
+
+**Response (ready):**
+```json
+{
+  "status": "ready",
+  "rpc": "ready"
+}
+```
+
+**Response (not ready) - HTTP 503:**
+```json
+{
+  "status": "not_ready",
+  "rpc": "not_ready",
+  "error": "RPC timeout"
 }
 ```
 
@@ -348,9 +376,21 @@ volumes:
 
 ## Security Best Practices
 
+### Automatic Security Validation
+
+The server performs automatic security checks on startup and warns about:
+- Default or common RPC credentials (testuser, testpassword, etc.)
+- Weak RPC passwords (less than 12 characters)
+- Weak API keys (less than 16 characters or simple patterns)
+- Public binding (0.0.0.0) without authentication
+- Wildcard CORS configuration (*)
+
+These warnings help identify misconfigurations before deployment.
+
 ### Production Checklist
 
 - [ ] **Enable API Key Authentication**: Set `api_keys` with strong, random keys
+- [ ] **Use Strong Credentials**: RPC password 12+ chars, API keys 16+ chars
 - [ ] **Deploy Behind Caddy/nginx**: Use reverse proxy for HTTPS with automatic certificates
 - [ ] **Configure CORS**: Specify exact allowed origins (not `"*"`)
 - [ ] **Adjust Rate Limits**: Set appropriate limits for your use case
@@ -359,6 +399,7 @@ volumes:
 - [ ] **Monitor Logs**: Set up log aggregation for security monitoring
 - [ ] **Keep Updated**: Regularly update to get security patches
 - [ ] **Configure Firewall**: Only expose Caddy (port 80/443), keep RPC server internal
+- [ ] **Review Security Warnings**: Address all startup security warnings
 
 ### API Key Management
 
@@ -407,12 +448,66 @@ Use this ID to trace requests through your logs.
 
 ### Health Monitoring
 
-Set up monitoring on the `/health` endpoint:
+#### Liveness and Readiness Probes
+
+The server provides two endpoints for health monitoring:
+
+- `/health` - Liveness probe: Returns 200 if application is alive
+- `/ready` - Readiness probe: Returns 200 if ready for traffic, 503 if not ready
 
 ```bash
-# Returns 200 OK if healthy
+# Liveness check - is the app alive?
 curl -f http://localhost:8080/health || echo "Server unhealthy"
+
+# Readiness check - is the app ready for traffic?
+curl -f http://localhost:8080/ready || echo "Server not ready"
 ```
+
+#### Docker Health Checks
+
+The Docker image includes built-in health checks:
+
+```bash
+# Check container health status
+docker ps
+
+# View health check logs
+docker inspect --format='{{json .State.Health}}' container_name | jq
+```
+
+#### Kubernetes Health Probes
+
+Example Kubernetes deployment with health probes:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verus-rpc
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: verus-rpc
+        image: ghcr.io/devdudeio/rust_verusd_rpc_server:latest
+        ports:
+        - containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+```
+
+#### Monitoring Tools Integration
 
 Integrate with monitoring tools like:
 - Prometheus + Grafana
