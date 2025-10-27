@@ -23,6 +23,12 @@ enum SpecialRule {
     ObjectMustNotContainKey(&'static str),
     /// Require exact parameter count
     ExactParamCount(usize),
+    /// Check string parameter max length
+    StringMaxLength(usize, usize), // (param_index, max_length)
+    /// Check array parameter max size
+    ArrayMaxSize(usize, usize), // (param_index, max_size)
+    /// Check number is in range (inclusive)
+    NumberRange(usize, i64, i64), // (param_index, min, max)
 }
 
 /// Method specification defining allowed parameters and validation rules
@@ -74,11 +80,17 @@ static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     m.insert("sendcurrency", MethodSpec::new(&["str", "arr", "int", "float", "bool"])
         .with_special_rules(vec![SpecialRule::RequireParamTrue(4)]));
 
-    // Standard methods with simple type validation
+    // Standard methods with enhanced validation
     m.insert("coinsupply", MethodSpec::new(&[]));
-    m.insert("convertpassphrase", MethodSpec::new(&["str"]));
-    m.insert("createmultisig", MethodSpec::new(&["int", "arr"]));
-    m.insert("createrawtransaction", MethodSpec::new(&["arr", "obj", "int", "int"]));
+    m.insert("convertpassphrase", MethodSpec::new(&["str"])
+        .with_special_rules(vec![SpecialRule::StringMaxLength(0, 10000)]));
+    m.insert("createmultisig", MethodSpec::new(&["int", "arr"])
+        .with_special_rules(vec![
+            SpecialRule::NumberRange(0, 1, 16),
+            SpecialRule::ArrayMaxSize(1, 16)
+        ]));
+    m.insert("createrawtransaction", MethodSpec::new(&["arr", "obj", "int", "int"])
+        .with_special_rules(vec![SpecialRule::ArrayMaxSize(0, 1000)]));
     m.insert("decoderawtransaction", MethodSpec::new(&["str", "bool"]));
     m.insert("decodescript", MethodSpec::new(&["str", "bool"]));
     m.insert("estimateconversion", MethodSpec::new(&["obj"]));
@@ -200,6 +212,37 @@ fn apply_special_rules(params: &[Box<RawValue>], rules: &[SpecialRule]) -> bool 
                     return false;
                 }
             }
+            SpecialRule::StringMaxLength(index, max_len) => {
+                let str_len = params
+                    .get(*index)
+                    .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
+                    .and_then(|v| v.as_str().map(|s| s.len()))
+                    .unwrap_or(0);
+                if str_len > *max_len {
+                    return false;
+                }
+            }
+            SpecialRule::ArrayMaxSize(index, max_size) => {
+                let arr_len = params
+                    .get(*index)
+                    .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
+                    .and_then(|v| v.as_array().map(|a| a.len()))
+                    .unwrap_or(0);
+                if arr_len > *max_size {
+                    return false;
+                }
+            }
+            SpecialRule::NumberRange(index, min, max) => {
+                let num_in_range = params
+                    .get(*index)
+                    .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n >= *min && n <= *max)
+                    .unwrap_or(false);
+                if !num_in_range {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -256,5 +299,30 @@ mod tests {
         let obj_param = RawValue::from_string("{\"address\":\"test\",\"message\":\"test\"}".to_string()).unwrap();
         let params = vec![obj_param];
         assert!(!is_method_allowed("signdata", &params));
+    }
+
+    #[test]
+    fn test_createmultisig_valid_range() {
+        let num_param = RawValue::from_string("2".to_string()).unwrap();
+        let arr_param = RawValue::from_string("[\"key1\",\"key2\",\"key3\"]".to_string()).unwrap();
+        let params = vec![num_param, arr_param];
+        assert!(is_method_allowed("createmultisig", &params));
+    }
+
+    #[test]
+    fn test_createmultisig_invalid_range() {
+        let num_param = RawValue::from_string("20".to_string()).unwrap();
+        let arr_param = RawValue::from_string("[]".to_string()).unwrap();
+        let params = vec![num_param, arr_param];
+        assert!(!is_method_allowed("createmultisig", &params));
+    }
+
+    #[test]
+    fn test_createmultisig_array_too_large() {
+        let num_param = RawValue::from_string("2".to_string()).unwrap();
+        let large_arr = (0..20).map(|i| format!("\"key{}\"", i)).collect::<Vec<_>>().join(",");
+        let arr_param = RawValue::from_string(format!("[{}]", large_arr)).unwrap();
+        let params = vec![num_param, arr_param];
+        assert!(!is_method_allowed("createmultisig", &params));
     }
 }
