@@ -1,10 +1,11 @@
-use serde_json::Value;
-use serde_json::value::RawValue;
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
+use serde_json::value::RawValue;
+use serde_json::Value;
+use std::collections::HashMap;
 
 /// Type definitions for RPC method parameters
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum ParamType {
     Str,
     Int,
@@ -57,40 +58,70 @@ static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     let mut m = HashMap::new();
 
     // Special cases with custom validation
-    m.insert("fundrawtransaction", MethodSpec::new(&["str", "arr", "str", "float"])
-        .with_special_rules(vec![SpecialRule::ExactParamCount(4)]));
+    m.insert(
+        "fundrawtransaction",
+        MethodSpec::new(&["str", "arr", "str", "float"])
+            .with_special_rules(vec![SpecialRule::ExactParamCount(4)]),
+    );
 
-    m.insert("signdata", MethodSpec::new(&["obj"])
-        .with_special_rules(vec![
+    m.insert(
+        "signdata",
+        MethodSpec::new(&["obj"]).with_special_rules(vec![
             SpecialRule::ObjectMustNotContainKey("address"),
-            SpecialRule::ExactParamCount(1)
-        ]));
+            SpecialRule::ExactParamCount(1),
+        ]),
+    );
 
     // Identity methods that require param[1] to be true
-    m.insert("recoveridentity", MethodSpec::new(&["obj", "bool", "bool", "float", "str"])
-        .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]));
-    m.insert("registeridentity", MethodSpec::new(&["obj", "bool", "float", "str"])
-        .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]));
-    m.insert("revokeidentity", MethodSpec::new(&["str", "bool", "bool", "float", "str"])
-        .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]));
-    m.insert("updateidentity", MethodSpec::new(&["obj", "bool", "bool", "float", "str"])
-        .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]));
-    m.insert("setidentitytimelock", MethodSpec::new(&["str", "obj", "bool", "float", "str"])
-        .with_special_rules(vec![SpecialRule::RequireParamTrue(2)]));
-    m.insert("sendcurrency", MethodSpec::new(&["str", "arr", "int", "float", "bool"])
-        .with_special_rules(vec![SpecialRule::RequireParamTrue(4)]));
+    m.insert(
+        "recoveridentity",
+        MethodSpec::new(&["obj", "bool", "bool", "float", "str"])
+            .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]),
+    );
+    m.insert(
+        "registeridentity",
+        MethodSpec::new(&["obj", "bool", "float", "str"])
+            .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]),
+    );
+    m.insert(
+        "revokeidentity",
+        MethodSpec::new(&["str", "bool", "bool", "float", "str"])
+            .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]),
+    );
+    m.insert(
+        "updateidentity",
+        MethodSpec::new(&["obj", "bool", "bool", "float", "str"])
+            .with_special_rules(vec![SpecialRule::RequireParamTrue(1)]),
+    );
+    m.insert(
+        "setidentitytimelock",
+        MethodSpec::new(&["str", "obj", "bool", "float", "str"])
+            .with_special_rules(vec![SpecialRule::RequireParamTrue(2)]),
+    );
+    m.insert(
+        "sendcurrency",
+        MethodSpec::new(&["str", "arr", "int", "float", "bool"])
+            .with_special_rules(vec![SpecialRule::RequireParamTrue(4)]),
+    );
 
     // Standard methods with enhanced validation
     m.insert("coinsupply", MethodSpec::new(&[]));
-    m.insert("convertpassphrase", MethodSpec::new(&["str"])
-        .with_special_rules(vec![SpecialRule::StringMaxLength(0, 10000)]));
-    m.insert("createmultisig", MethodSpec::new(&["int", "arr"])
-        .with_special_rules(vec![
+    m.insert(
+        "convertpassphrase",
+        MethodSpec::new(&["str"]).with_special_rules(vec![SpecialRule::StringMaxLength(0, 10000)]),
+    );
+    m.insert(
+        "createmultisig",
+        MethodSpec::new(&["int", "arr"]).with_special_rules(vec![
             SpecialRule::NumberRange(0, 1, 16),
-            SpecialRule::ArrayMaxSize(1, 16)
-        ]));
-    m.insert("createrawtransaction", MethodSpec::new(&["arr", "obj", "int", "int"])
-        .with_special_rules(vec![SpecialRule::ArrayMaxSize(0, 1000)]));
+            SpecialRule::ArrayMaxSize(1, 16),
+        ]),
+    );
+    m.insert(
+        "createrawtransaction",
+        MethodSpec::new(&["arr", "obj", "int", "int"])
+            .with_special_rules(vec![SpecialRule::ArrayMaxSize(0, 1000)]),
+    );
     m.insert("decoderawtransaction", MethodSpec::new(&["str", "bool"]));
     m.insert("decodescript", MethodSpec::new(&["str", "bool"]));
     m.insert("estimateconversion", MethodSpec::new(&["obj"]));
@@ -113,7 +144,10 @@ static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     m.insert("getblocktemplate", MethodSpec::new(&["obj"]));
     m.insert("getchaintips", MethodSpec::new(&[]));
     m.insert("getcurrency", MethodSpec::new(&["str"]));
-    m.insert("getcurrencyconverters", MethodSpec::new(&["str", "str", "str"]));
+    m.insert(
+        "getcurrencyconverters",
+        MethodSpec::new(&["str", "str", "str"]),
+    );
     m.insert("getcurrencystate", MethodSpec::new(&["str", "str", "str"]));
     m.insert("getcurrencytrust", MethodSpec::new(&["arr"]));
     m.insert("getdifficulty", MethodSpec::new(&[]));
@@ -123,9 +157,15 @@ static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     m.insert("getidentitieswithaddress", MethodSpec::new(&["obj"]));
     m.insert("getidentitieswithrevocation", MethodSpec::new(&["obj"]));
     m.insert("getidentitieswithrecovery", MethodSpec::new(&["obj"]));
-    m.insert("getidentity", MethodSpec::new(&["str", "int", "bool", "int"]));
+    m.insert(
+        "getidentity",
+        MethodSpec::new(&["str", "int", "bool", "int"]),
+    );
     m.insert("getidentitytrust", MethodSpec::new(&["arr"]));
-    m.insert("getidentitycontent", MethodSpec::new(&["str", "int", "int", "bool", "int", "str", "bool"]));
+    m.insert(
+        "getidentitycontent",
+        MethodSpec::new(&["str", "int", "int", "bool", "int", "str", "bool"]),
+    );
     m.insert("getlastimportfrom", MethodSpec::new(&["str"]));
     m.insert("getlaunchinfo", MethodSpec::new(&["str"]));
     m.insert("getmempoolinfo", MethodSpec::new(&[]));
@@ -146,10 +186,19 @@ static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     m.insert("help", MethodSpec::new(&[]));
     m.insert("listcurrencies", MethodSpec::new(&["obj", "int", "int"]));
     m.insert("sendrawtransaction", MethodSpec::new(&["str"]));
-    m.insert("submitacceptednotarization", MethodSpec::new(&["obj", "obj"]));
+    m.insert(
+        "submitacceptednotarization",
+        MethodSpec::new(&["obj", "obj"]),
+    );
     m.insert("submitimports", MethodSpec::new(&["obj"]));
-    m.insert("verifymessage", MethodSpec::new(&["str", "str", "str", "bool"]));
-    m.insert("verifyhash", MethodSpec::new(&["str", "str", "str", "bool"]));
+    m.insert(
+        "verifymessage",
+        MethodSpec::new(&["str", "str", "str", "bool"]),
+    );
+    m.insert(
+        "verifyhash",
+        MethodSpec::new(&["str", "str", "str", "bool"]),
+    );
     m.insert("verifysignature", MethodSpec::new(&["obj"]));
 
     m
@@ -296,7 +345,9 @@ mod tests {
 
     #[test]
     fn test_signdata_with_address_rejected() {
-        let obj_param = RawValue::from_string("{\"address\":\"test\",\"message\":\"test\"}".to_string()).unwrap();
+        let obj_param =
+            RawValue::from_string("{\"address\":\"test\",\"message\":\"test\"}".to_string())
+                .unwrap();
         let params = vec![obj_param];
         assert!(!is_method_allowed("signdata", &params));
     }
@@ -320,7 +371,10 @@ mod tests {
     #[test]
     fn test_createmultisig_array_too_large() {
         let num_param = RawValue::from_string("2".to_string()).unwrap();
-        let large_arr = (0..20).map(|i| format!("\"key{}\"", i)).collect::<Vec<_>>().join(",");
+        let large_arr = (0..20)
+            .map(|i| format!("\"key{}\"", i))
+            .collect::<Vec<_>>()
+            .join(",");
         let arr_param = RawValue::from_string(format!("[{}]", large_arr)).unwrap();
         let params = vec![num_param, arr_param];
         assert!(!is_method_allowed("createmultisig", &params));

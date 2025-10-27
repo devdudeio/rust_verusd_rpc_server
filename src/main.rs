@@ -1,29 +1,29 @@
-use hyper::{Request, Response, StatusCode};
+use anyhow::{anyhow, Context, Result};
+use dashmap::DashMap;
+use governor::clock::DefaultClock;
+use governor::state::InMemoryState;
+use governor::{Quota, RateLimiter};
+use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use http_body_util::{BodyExt, Full};
-use serde_json::{Value, json};
-use jsonrpc::{Client, error::RpcError};
 use jsonrpc::simple_http::{self, SimpleHttpTransport};
+use jsonrpc::{error::RpcError, Client};
+use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde_json::value::RawValue;
-use std::sync::Arc;
-use std::net::{SocketAddr, IpAddr};
-use std::time::Duration;
-use std::num::NonZeroU32;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use rustls_pemfile::{certs, pkcs8_private_keys};
-use tracing::{info, warn, error, debug};
-use anyhow::{Result, Context, anyhow};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use governor::{Quota, RateLimiter};
-use governor::state::InMemoryState;
-use governor::clock::DefaultClock;
-use dashmap::DashMap;
 
 mod allowlist;
 
@@ -47,7 +47,12 @@ struct VerusRPC {
 }
 
 impl VerusRPC {
-    fn new(url: &str, user: &str, pass: &str, timeout: Duration) -> Result<VerusRPC, simple_http::Error> {
+    fn new(
+        url: &str,
+        user: &str,
+        pass: &str,
+        timeout: Duration,
+    ) -> Result<VerusRPC, simple_http::Error> {
         let transport = SimpleHttpTransport::builder()
             .url(url)?
             .auth(user, Some(pass))
@@ -66,7 +71,7 @@ impl VerusRPC {
                 return Err(RpcError {
                     code: -32602,
                     message: "Invalid method parameter".into(),
-                    data: None
+                    data: None,
                 });
             }
         };
@@ -75,49 +80,56 @@ impl VerusRPC {
 
         let params: Result<Vec<Box<RawValue>>, RpcError> = match req_body["params"].as_array() {
             Some(params) => {
-                params.iter().enumerate().map(|(i, v)| {
-                    if method == "getblock" && i == 0 {
-                        if let Ok(num) = v.to_string().parse::<i64>() {
-                            // Legacy hack because getblock in JS used to allow
-                            // strings to be passed in clientside and the former JS rpc server
-                            // wouldn't care. This will be deprecated in the future and shouldn't
-                            // be relied upon.
-                            RawValue::from_string(format!("\"{}\"", num)).map_err(|e| {
-                                error!("Failed to create RawValue for getblock parameter: {}", e);
-                                RpcError {
-                                    code: -32602,
-                                    message: "Invalid parameter format".into(),
-                                    data: None
-                                }
-                            })
+                params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        if method == "getblock" && i == 0 {
+                            if let Ok(num) = v.to_string().parse::<i64>() {
+                                // Legacy hack because getblock in JS used to allow
+                                // strings to be passed in clientside and the former JS rpc server
+                                // wouldn't care. This will be deprecated in the future and shouldn't
+                                // be relied upon.
+                                RawValue::from_string(format!("\"{}\"", num)).map_err(|e| {
+                                    error!(
+                                        "Failed to create RawValue for getblock parameter: {}",
+                                        e
+                                    );
+                                    RpcError {
+                                        code: -32602,
+                                        message: "Invalid parameter format".into(),
+                                        data: None,
+                                    }
+                                })
+                            } else {
+                                RawValue::from_string(v.to_string()).map_err(|e| {
+                                    error!("Failed to create RawValue: {}", e);
+                                    RpcError {
+                                        code: -32602,
+                                        message: "Invalid parameter format".into(),
+                                        data: None,
+                                    }
+                                })
+                            }
                         } else {
                             RawValue::from_string(v.to_string()).map_err(|e| {
                                 error!("Failed to create RawValue: {}", e);
                                 RpcError {
                                     code: -32602,
                                     message: "Invalid parameter format".into(),
-                                    data: None
+                                    data: None,
                                 }
                             })
                         }
-                    } else {
-                        RawValue::from_string(v.to_string()).map_err(|e| {
-                            error!("Failed to create RawValue: {}", e);
-                            RpcError {
-                                code: -32602,
-                                message: "Invalid parameter format".into(),
-                                data: None
-                            }
-                        })
-                    }
-                }).collect()
-            },
+                    })
+                    .collect()
+            }
             None => {
                 warn!("Missing or invalid params parameter");
                 Err(RpcError {
                     code: -32602,
                     message: "Invalid params parameter".into(),
-                    data: None
+                    data: None,
                 })
             }
         };
@@ -129,33 +141,53 @@ impl VerusRPC {
             return Err(RpcError {
                 code: -32601,
                 message: "Method not found".into(),
-                data: None
+                data: None,
             });
         }
 
-        let request = self.client.build_request(method, &params);
-
-        // Wrap RPC call with timeout
-        let response = tokio::time::timeout(self.timeout, async {
-            self.client.send_request(request)
-        }).await.map_err(|_| {
-            error!("RPC request timed out after {:?}", self.timeout);
+        // Convert Vec<Box<RawValue>> into a single RawValue containing the params array
+        let params_array_str = format!(
+            "[{}]",
+            params
+                .iter()
+                .map(|p| p.get())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let params_raw = RawValue::from_string(params_array_str).map_err(|e| {
+            error!("Failed to serialize params: {}", e);
             RpcError {
                 code: -32603,
-                message: format!("Request timed out after {:?}", self.timeout),
-                data: None
-            }
-        })?.map_err(|e| {
-            error!("RPC request failed: {:?}", e);
-            match e {
-                jsonrpc::Error::Rpc(rpc_error) => rpc_error,
-                _ => RpcError {
-                    code: -32603,
-                    message: "Internal error".into(),
-                    data: None
-                },
+                message: "Internal error".into(),
+                data: None,
             }
         })?;
+
+        let request = self.client.build_request(method, Some(&params_raw));
+
+        // Wrap RPC call with timeout
+        let response =
+            tokio::time::timeout(self.timeout, async { self.client.send_request(request) })
+                .await
+                .map_err(|_| {
+                    error!("RPC request timed out after {:?}", self.timeout);
+                    RpcError {
+                        code: -32603,
+                        message: format!("Request timed out after {:?}", self.timeout),
+                        data: None,
+                    }
+                })?
+                .map_err(|e| {
+                    error!("RPC request failed: {:?}", e);
+                    match e {
+                        jsonrpc::Error::Rpc(rpc_error) => rpc_error,
+                        _ => RpcError {
+                            code: -32603,
+                            message: "Internal error".into(),
+                            data: None,
+                        },
+                    }
+                })?;
 
         let result: Value = response.result().map_err(|e| {
             error!("RPC response parsing failed: {:?}", e);
@@ -164,7 +196,7 @@ impl VerusRPC {
                 _ => RpcError {
                     code: -32603,
                     message: "Internal error".into(),
-                    data: None
+                    data: None,
                 },
             }
         })?;
@@ -180,9 +212,7 @@ impl VerusRPC {
             "params": []
         });
 
-        match tokio::time::timeout(self.timeout, async {
-            self.handle(check_request).await
-        }).await {
+        match tokio::time::timeout(self.timeout, async { self.handle(check_request).await }).await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => Err(format!("RPC error: {}", e.message)),
             Err(_) => Err("RPC timeout".to_string()),
@@ -233,7 +263,7 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> Result<tokio_rustls::rust
 fn add_cors_and_security_headers(
     response: &mut Response<Full<bytes::Bytes>>,
     cors_origins: &[String],
-    request_origin: Option<&str>
+    request_origin: Option<&String>,
 ) {
     use hyper::header::HeaderValue;
     let headers = response.headers_mut();
@@ -253,55 +283,55 @@ fn add_cors_and_security_headers(
     } else {
         // No origin in request, use first allowed or deny
         if !cors_origins.is_empty() {
-            HeaderValue::from_str(&cors_origins[0]).unwrap_or_else(|_| HeaderValue::from_static("*"))
+            HeaderValue::from_str(&cors_origins[0])
+                .unwrap_or_else(|_| HeaderValue::from_static("*"))
         } else {
             HeaderValue::from_static("*")
         }
     };
 
     if !allowed_origin.is_empty() {
-        headers.insert(
-            hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            allowed_origin
-        );
+        headers.insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, allowed_origin);
         headers.insert(
             hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET, HEAD, PUT, OPTIONS, POST")
+            HeaderValue::from_static("GET, HEAD, PUT, OPTIONS, POST"),
         );
         headers.insert(
             hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
-            HeaderValue::from_static("Content-Type, Authorization, Accept, X-Request-ID, X-API-Key")
+            HeaderValue::from_static(
+                "Content-Type, Authorization, Accept, X-Request-ID, X-API-Key",
+            ),
         );
         headers.insert(
             hyper::header::ACCESS_CONTROL_MAX_AGE,
-            HeaderValue::from_static("3600")
+            HeaderValue::from_static("3600"),
         );
         headers.insert(
             hyper::header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("X-Request-ID")
+            HeaderValue::from_static("X-Request-ID"),
         );
     }
 
     // Security headers
     headers.insert(
         hyper::header::REFERRER_POLICY,
-        HeaderValue::from_static("origin-when-cross-origin")
+        HeaderValue::from_static("origin-when-cross-origin"),
     );
     headers.insert(
         hyper::header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff")
+        HeaderValue::from_static("nosniff"),
     );
     headers.insert(
         hyper::header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("DENY")
+        HeaderValue::from_static("DENY"),
     );
     headers.insert(
         "X-XSS-Protection",
-        HeaderValue::from_static("1; mode=block")
+        HeaderValue::from_static("1; mode=block"),
     );
     headers.insert(
         hyper::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json")
+        HeaderValue::from_static("application/json"),
     );
 }
 
@@ -310,7 +340,7 @@ async fn handle_req(
     rpc: Arc<VerusRPC>,
     rate_limiter: Arc<IpRateLimiter>,
     client_ip: IpAddr,
-    server_config: Arc<ServerConfig>
+    server_config: Arc<ServerConfig>,
 ) -> Result<Response<Full<bytes::Bytes>>> {
     // Generate request ID for correlation
     let request_id = Uuid::new_v4().to_string();
@@ -319,29 +349,26 @@ async fn handle_req(
 
     info!("Incoming {} request to {}", req.method(), req.uri().path());
 
-    // Extract Origin header for CORS
-    let request_origin = req.headers()
+    // Extract Origin header for CORS (convert to String to avoid borrow issues)
+    let request_origin = req
+        .headers()
         .get(hyper::header::ORIGIN)
-        .and_then(|v| v.to_str().ok());
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     // Check API key authentication (skip health checks)
     if req.uri().path() != "/health" {
         if let Some(ref api_keys) = server_config.api_keys {
             // Extract API key from headers (X-API-Key or Authorization: Bearer)
-            let provided_key = req.headers()
+            let provided_key = req
+                .headers()
                 .get("X-API-Key")
                 .and_then(|v| v.to_str().ok())
                 .or_else(|| {
                     req.headers()
                         .get(hyper::header::AUTHORIZATION)
                         .and_then(|v| v.to_str().ok())
-                        .and_then(|auth| {
-                            if auth.starts_with("Bearer ") {
-                                Some(&auth[7..])
-                            } else {
-                                None
-                            }
-                        })
+                        .and_then(|auth| auth.strip_prefix("Bearer "))
                 });
 
             match provided_key {
@@ -352,19 +379,28 @@ async fn handle_req(
                     warn!("Invalid API key provided");
                     let mut response = Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
-                        .body(Full::new(bytes::Bytes::from(json!({
-                            "error": {
-                                "code": -32001,
-                                "message": "Invalid API key",
-                                "request_id": &request_id
-                            }
-                        }).to_string())))
+                        .body(Full::new(bytes::Bytes::from(
+                            json!({
+                                "error": {
+                                    "code": -32001,
+                                    "message": "Invalid API key",
+                                    "request_id": &request_id
+                                }
+                            })
+                            .to_string(),
+                        )))
                         .context("Failed to build authentication error response")?;
                     response.headers_mut().insert(
                         "X-Request-ID",
-                        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                        request_id
+                            .parse()
+                            .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
                     );
-                    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+                    add_cors_and_security_headers(
+                        &mut response,
+                        &server_config.cors_origins,
+                        request_origin.as_ref(),
+                    );
                     return Ok(response);
                 }
                 None => {
@@ -381,9 +417,15 @@ async fn handle_req(
                         .context("Failed to build authentication error response")?;
                     response.headers_mut().insert(
                         "X-Request-ID",
-                        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                        request_id
+                            .parse()
+                            .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
                     );
-                    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+                    add_cors_and_security_headers(
+                        &mut response,
+                        &server_config.cors_origins,
+                        request_origin.as_ref(),
+                    );
                     return Ok(response);
                 }
             }
@@ -400,23 +442,31 @@ async fn handle_req(
                 warn!("Rate limit exceeded for IP {}", client_ip);
                 let mut response = Response::builder()
                     .status(StatusCode::TOO_MANY_REQUESTS)
-                    .body(Full::new(bytes::Bytes::from(json!({
-                        "error": {
-                            "code": -32005,
-                            "message": "Rate limit exceeded. Please try again later.",
-                            "request_id": &request_id
-                        }
-                    }).to_string())))
+                    .body(Full::new(bytes::Bytes::from(
+                        json!({
+                            "error": {
+                                "code": -32005,
+                                "message": "Rate limit exceeded. Please try again later.",
+                                "request_id": &request_id
+                            }
+                        })
+                        .to_string(),
+                    )))
                     .context("Failed to build rate limit response")?;
                 response.headers_mut().insert(
                     "X-Request-ID",
-                    request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
                 );
-                response.headers_mut().insert(
-                    "Retry-After",
-                    hyper::header::HeaderValue::from_static("60")
+                response
+                    .headers_mut()
+                    .insert("Retry-After", hyper::header::HeaderValue::from_static("60"));
+                add_cors_and_security_headers(
+                    &mut response,
+                    &server_config.cors_origins,
+                    request_origin.as_ref(),
                 );
-                add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
                 return Ok(response);
             }
         }
@@ -435,15 +485,17 @@ async fn handle_req(
                 "status": "unhealthy",
                 "rpc": "disconnected",
                 "error": e
-            })
+            }),
         };
 
         let mut response = Response::new(Full::new(bytes::Bytes::from(health_status.to_string())));
         response.headers_mut().insert(
             "X-Request-ID",
-            request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+            request_id
+                .parse()
+                .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
         );
-        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin.as_ref());
         return Ok(response);
     }
 
@@ -453,15 +505,18 @@ async fn handle_req(
         let mut response = Response::new(Full::new(bytes::Bytes::new()));
         response.headers_mut().insert(
             "X-Request-ID",
-            request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+            request_id
+                .parse()
+                .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
         );
-        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin.as_ref());
         return Ok(response);
     }
 
     // Validate Content-Type header for POST requests
     if req.method() == hyper::Method::POST {
-        let content_type = req.headers()
+        let content_type = req
+            .headers()
             .get(hyper::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok());
 
@@ -473,26 +528,42 @@ async fn handle_req(
                 warn!("Invalid Content-Type: {}, expected application/json", ct);
                 let mut response = Response::builder()
                     .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-                    .body(Full::new(bytes::Bytes::from("Content-Type must be application/json")))
+                    .body(Full::new(bytes::Bytes::from(
+                        "Content-Type must be application/json",
+                    )))
                     .context("Failed to build response")?;
                 response.headers_mut().insert(
                     "X-Request-ID",
-                    request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
                 );
-                add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+                add_cors_and_security_headers(
+                    &mut response,
+                    &server_config.cors_origins,
+                    request_origin.as_ref(),
+                );
                 return Ok(response);
             }
             None => {
                 warn!("Missing Content-Type header");
                 let mut response = Response::builder()
                     .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-                    .body(Full::new(bytes::Bytes::from("Content-Type header required")))
+                    .body(Full::new(bytes::Bytes::from(
+                        "Content-Type header required",
+                    )))
                     .context("Failed to build response")?;
                 response.headers_mut().insert(
                     "X-Request-ID",
-                    request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
                 );
-                add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+                add_cors_and_security_headers(
+                    &mut response,
+                    &server_config.cors_origins,
+                    request_origin.as_ref(),
+                );
                 return Ok(response);
             }
         }
@@ -510,9 +581,15 @@ async fn handle_req(
                         .context("Failed to build response")?;
                     response.headers_mut().insert(
                         "X-Request-ID",
-                        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                        request_id
+                            .parse()
+                            .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
                     );
-                    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+                    add_cors_and_security_headers(
+                        &mut response,
+                        &server_config.cors_origins,
+                        request_origin.as_ref(),
+                    );
                     return Ok(response);
                 }
             }
@@ -520,12 +597,14 @@ async fn handle_req(
     }
 
     // Read request body
-    let whole_body = req.collect().await
+    let whole_body = req
+        .collect()
+        .await
         .context("Failed to read request body")?
         .to_bytes();
 
-    let str_body = String::from_utf8(whole_body.to_vec())
-        .context("Request body is not valid UTF-8")?;
+    let str_body =
+        String::from_utf8(whole_body.to_vec()).context("Request body is not valid UTF-8")?;
 
     debug!("Received request body ({} bytes)", str_body.len());
 
@@ -538,7 +617,7 @@ async fn handle_req(
             Err(RpcError {
                 code: -32700,
                 message: "Parse error".into(),
-                data: None
+                data: None,
             })
         }
     };
@@ -551,22 +630,27 @@ async fn handle_req(
         }
         Err(err) => {
             warn!("Request failed with error code: {}", err.code);
-            bytes::Bytes::from(json!({
-                "error": {
-                    "code": err.code,
-                    "message": err.message,
-                    "request_id": &request_id
-                }
-            }).to_string())
+            bytes::Bytes::from(
+                json!({
+                    "error": {
+                        "code": err.code,
+                        "message": err.message,
+                        "request_id": &request_id
+                    }
+                })
+                .to_string(),
+            )
         }
     };
 
     let mut response = Response::new(Full::new(body_bytes));
     response.headers_mut().insert(
         "X-Request-ID",
-        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+        request_id
+            .parse()
+            .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
     );
-    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin.as_ref());
     Ok(response)
 }
 
@@ -576,7 +660,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -587,29 +671,31 @@ async fn main() -> Result<()> {
     // Example: VERUS_RPC_RPC_URL, VERUS_RPC_SERVER_PORT
     let settings = config::Config::builder()
         .add_source(config::File::with_name("Conf"))
-        .add_source(
-            config::Environment::with_prefix("VERUS_RPC")
-                .separator("_")
-        )
+        .add_source(config::Environment::with_prefix("VERUS_RPC").separator("_"))
         .build()
         .context("Failed to load configuration")?;
 
     // Read and validate configuration
-    let url = settings.get_string("rpc_url")
+    let url = settings
+        .get_string("rpc_url")
         .context("Failed to read 'rpc_url' from configuration")?
         .trim()
         .to_string();
-    let user = settings.get_string("rpc_user")
+    let user = settings
+        .get_string("rpc_user")
         .context("Failed to read 'rpc_user' from configuration")?
         .trim()
         .to_string();
-    let password = settings.get_string("rpc_password")
+    let password = settings
+        .get_string("rpc_password")
         .context("Failed to read 'rpc_password' from configuration")?
         .trim()
         .to_string();
-    let port = settings.get_int("server_port")
+    let port = settings
+        .get_int("server_port")
         .context("Failed to read 'server_port' from configuration")?;
-    let server_addr_str = settings.get_string("server_addr")
+    let server_addr_str = settings
+        .get_string("server_addr")
         .context("Failed to read 'server_addr' from configuration")?
         .trim()
         .to_string();
@@ -641,24 +727,31 @@ async fn main() -> Result<()> {
     }
 
     // Parse and validate server address
-    let server_addr = server_addr_str.parse::<IpAddr>()
+    let server_addr = server_addr_str
+        .parse::<IpAddr>()
         .context("Invalid server_addr: must be a valid IP address")?;
 
     // Read request timeout from configuration with default
-    let timeout_secs = settings.get_int("request_timeout")
+    let timeout_secs = settings
+        .get_int("request_timeout")
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT as i64);
     let timeout = Duration::from_secs(timeout_secs as u64);
 
     // Read rate limiting configuration
-    let rate_limit_per_minute = settings.get_int("rate_limit_per_minute")
+    let rate_limit_per_minute = settings
+        .get_int("rate_limit_per_minute")
         .unwrap_or(DEFAULT_RATE_LIMIT_PER_MINUTE as i64) as u32;
-    let rate_limit_burst = settings.get_int("rate_limit_burst")
+    let rate_limit_burst = settings
+        .get_int("rate_limit_burst")
         .unwrap_or(DEFAULT_RATE_LIMIT_BURST as i64) as u32;
 
     // Read API keys configuration
-    let api_keys = settings.get_string("api_keys").ok()
+    let api_keys = settings
+        .get_string("api_keys")
+        .ok()
         .map(|keys_str| {
-            keys_str.split(',')
+            keys_str
+                .split(',')
                 .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty())
                 .collect::<HashSet<String>>()
@@ -666,10 +759,12 @@ async fn main() -> Result<()> {
         .filter(|keys: &HashSet<String>| !keys.is_empty());
 
     // Read CORS origins configuration
-    let cors_origins = settings.get_string("cors_allowed_origins")
+    let cors_origins = settings
+        .get_string("cors_allowed_origins")
         .ok()
         .map(|origins_str| {
-            origins_str.split(',')
+            origins_str
+                .split(',')
                 .map(|o| o.trim().to_string())
                 .filter(|o| !o.is_empty())
                 .collect::<Vec<String>>()
@@ -688,15 +783,19 @@ async fn main() -> Result<()> {
     let tls_acceptor = match (tls_cert_path, tls_key_path) {
         (Some(cert), Some(key)) => {
             info!("Loading TLS configuration...");
-            let tls_config = load_tls_config(&cert, &key)
-                .context("Failed to load TLS configuration")?;
+            let tls_config =
+                load_tls_config(&cert, &key).context("Failed to load TLS configuration")?;
             Some(Arc::new(TlsAcceptor::from(Arc::new(tls_config))))
         }
         (Some(_), None) => {
-            return Err(anyhow!("tls_cert_path provided but tls_key_path is missing"));
+            return Err(anyhow!(
+                "tls_cert_path provided but tls_key_path is missing"
+            ));
         }
         (None, Some(_)) => {
-            return Err(anyhow!("tls_key_path provided but tls_cert_path is missing"));
+            return Err(anyhow!(
+                "tls_key_path provided but tls_cert_path is missing"
+            ));
         }
         (None, None) => None,
     };
@@ -708,25 +807,31 @@ async fn main() -> Result<()> {
 
     // Create and validate RPC client
     let rpc = Arc::new(
-        VerusRPC::new(&url, &user, &password, timeout)
-            .context("Failed to create RPC client")?
+        VerusRPC::new(&url, &user, &password, timeout).context("Failed to create RPC client")?,
     );
 
     // Create rate limiter
     let quota = Quota::per_minute(
         NonZeroU32::new(rate_limit_per_minute)
-            .context("rate_limit_per_minute must be greater than 0")?
-    ).allow_burst(
-        NonZeroU32::new(rate_limit_burst)
-            .context("rate_limit_burst must be greater than 0")?
+            .context("rate_limit_per_minute must be greater than 0")?,
+    )
+    .allow_burst(
+        NonZeroU32::new(rate_limit_burst).context("rate_limit_burst must be greater than 0")?,
     );
     let rate_limiter = Arc::new(RateLimiter::dashmap(quota));
 
-    let protocol = if tls_acceptor.is_some() { "https" } else { "http" };
+    let protocol = if tls_acceptor.is_some() {
+        "https"
+    } else {
+        "http"
+    };
 
     info!("Server listening on {}", addr);
     info!("Health check available at {}://{}/health", protocol, addr);
-    info!("Rate limiting: {} requests/minute with burst of {}", rate_limit_per_minute, rate_limit_burst);
+    info!(
+        "Rate limiting: {} requests/minute with burst of {}",
+        rate_limit_per_minute, rate_limit_burst
+    );
 
     if tls_acceptor.is_some() {
         info!("TLS/HTTPS: ENABLED");
@@ -747,7 +852,8 @@ async fn main() -> Result<()> {
     }
 
     // Create TCP listener
-    let listener = TcpListener::bind(addr).await
+    let listener = TcpListener::bind(addr)
+        .await
         .context("Failed to bind to address")?;
 
     // Setup graceful shutdown signal handler
@@ -806,17 +912,30 @@ async fn main() -> Result<()> {
                         Ok(tls_stream) => {
                             let io = TokioIo::new(tls_stream);
                             if let Err(err) = http1::Builder::new()
-                                .serve_connection(io, service_fn(move |req| {
-                                    let rpc = Arc::clone(&rpc_clone);
-                                    let rate_limiter = Arc::clone(&rate_limiter_clone);
-                                    let server_config = Arc::clone(&server_config_clone);
-                                    async move {
-                                        handle_req(req, rpc, rate_limiter, client_ip, server_config).await
-                                    }
-                                }))
+                                .serve_connection(
+                                    io,
+                                    service_fn(move |req| {
+                                        let rpc = Arc::clone(&rpc_clone);
+                                        let rate_limiter = Arc::clone(&rate_limiter_clone);
+                                        let server_config = Arc::clone(&server_config_clone);
+                                        async move {
+                                            handle_req(
+                                                req,
+                                                rpc,
+                                                rate_limiter,
+                                                client_ip,
+                                                server_config,
+                                            )
+                                            .await
+                                        }
+                                    }),
+                                )
                                 .await
                             {
-                                error!("Error serving HTTPS connection from {}: {:?}", remote_addr, err);
+                                error!(
+                                    "Error serving HTTPS connection from {}: {:?}",
+                                    remote_addr, err
+                                );
                             }
                         }
                         Err(err) => {
@@ -829,17 +948,24 @@ async fn main() -> Result<()> {
                 tokio::task::spawn(async move {
                     let io = TokioIo::new(stream);
                     if let Err(err) = http1::Builder::new()
-                        .serve_connection(io, service_fn(move |req| {
-                            let rpc = Arc::clone(&rpc_clone);
-                            let rate_limiter = Arc::clone(&rate_limiter_clone);
-                            let server_config = Arc::clone(&server_config_clone);
-                            async move {
-                                handle_req(req, rpc, rate_limiter, client_ip, server_config).await
-                            }
-                        }))
+                        .serve_connection(
+                            io,
+                            service_fn(move |req| {
+                                let rpc = Arc::clone(&rpc_clone);
+                                let rate_limiter = Arc::clone(&rate_limiter_clone);
+                                let server_config = Arc::clone(&server_config_clone);
+                                async move {
+                                    handle_req(req, rpc, rate_limiter, client_ip, server_config)
+                                        .await
+                                }
+                            }),
+                        )
                         .await
                     {
-                        error!("Error serving HTTP connection from {}: {:?}", remote_addr, err);
+                        error!(
+                            "Error serving HTTP connection from {}: {:?}",
+                            remote_addr, err
+                        );
                     }
                 });
             }

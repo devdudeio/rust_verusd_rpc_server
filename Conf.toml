@@ -1,9 +1,9 @@
-rpc_url = "RPC_URL:PORT"
-rpc_user = "RPC_USER"
-rpc_password = "RPC_PASSWORD"
+rpc_url = "http://localhost:27486"
+rpc_user = "testuser"
+rpc_password = "testpassword"
 
-server_port = SERVER_PORT
-server_addr = "ADDRESS_TO_BIND_TO"
+server_port = 8080
+server_addr = "127.0.0.1"
 
 # Request timeout in seconds (optional, defaults to 30)
 # request_timeout = 30
