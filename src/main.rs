@@ -328,19 +328,48 @@ async fn main() -> Result<()> {
 
     // Read and validate configuration
     let url = settings.get_string("rpc_url")
-        .context("Failed to read 'rpc_url' from configuration")?;
+        .context("Failed to read 'rpc_url' from configuration")?
+        .trim()
+        .to_string();
     let user = settings.get_string("rpc_user")
-        .context("Failed to read 'rpc_user' from configuration")?;
+        .context("Failed to read 'rpc_user' from configuration")?
+        .trim()
+        .to_string();
     let password = settings.get_string("rpc_password")
-        .context("Failed to read 'rpc_password' from configuration")?;
+        .context("Failed to read 'rpc_password' from configuration")?
+        .trim()
+        .to_string();
     let port = settings.get_int("server_port")
         .context("Failed to read 'server_port' from configuration")?;
     let server_addr_str = settings.get_string("server_addr")
-        .context("Failed to read 'server_addr' from configuration")?;
+        .context("Failed to read 'server_addr' from configuration")?
+        .trim()
+        .to_string();
+
+    // Validate RPC URL format
+    if url.is_empty() {
+        return Err(anyhow!("rpc_url cannot be empty"));
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(anyhow!("rpc_url must start with http:// or https://"));
+    }
+
+    // Validate credentials are not empty
+    if user.is_empty() {
+        return Err(anyhow!("rpc_user cannot be empty"));
+    }
+    if password.is_empty() {
+        return Err(anyhow!("rpc_password cannot be empty"));
+    }
 
     // Validate port range
     if !(1..=65535).contains(&port) {
         return Err(anyhow!("Invalid server_port: must be between 1 and 65535"));
+    }
+
+    // Validate server address is not empty
+    if server_addr_str.is_empty() {
+        return Err(anyhow!("server_addr cannot be empty"));
     }
 
     // Parse and validate server address
