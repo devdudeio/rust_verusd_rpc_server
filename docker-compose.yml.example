@@ -1,0 +1,173 @@
+# Docker Compose configuration for Rust Verusd RPC Server
+# Copy this file to docker-compose.yml and customize for your environment
+
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # Option 1: RPC Server Only (when you have verusd running separately)
+  # ===========================================================================
+
+  rpc-server:
+    image: ghcr.io/devdudeio/rust_verusd_rpc_server:latest
+    container_name: verus-rpc-server
+    ports:
+      - "8080:8080"
+    environment:
+      # Required: Upstream Verus RPC connection
+      VERUS_RPC_RPC_URL: "http://host.docker.internal:27486"  # Use host.docker.internal for Mac/Windows
+      # VERUS_RPC_RPC_URL: "http://172.17.0.1:27486"  # Use Docker bridge IP for Linux
+      VERUS_RPC_RPC_USER: "your_rpc_username"
+      VERUS_RPC_RPC_PASSWORD: "your_rpc_password"
+
+      # Required: Server configuration
+      VERUS_RPC_SERVER_PORT: "8080"
+      VERUS_RPC_SERVER_ADDR: "0.0.0.0"
+
+      # Optional: Security
+      VERUS_RPC_API_KEYS: "your-api-key-1,your-api-key-2"
+      VERUS_RPC_RATE_LIMIT_PER_MINUTE: "100"
+      VERUS_RPC_RATE_LIMIT_BURST: "10"
+
+      # Optional: CORS
+      VERUS_RPC_CORS_ALLOWED_ORIGINS: "https://yourdomain.com"
+
+      # Optional: Logging
+      RUST_LOG: "info"
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Optional: Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ===========================================================================
+  # Option 2: RPC Server with Caddy reverse proxy (HTTPS)
+  # ===========================================================================
+
+  # Uncomment this section to enable HTTPS with Caddy
+
+  # rpc-server-internal:
+  #   image: ghcr.io/devdudeio/rust_verusd_rpc_server:latest
+  #   container_name: verus-rpc-server
+  #   expose:
+  #     - "8080"
+  #   environment:
+  #     VERUS_RPC_RPC_URL: "http://host.docker.internal:27486"
+  #     VERUS_RPC_RPC_USER: "your_rpc_username"
+  #     VERUS_RPC_RPC_PASSWORD: "your_rpc_password"
+  #     VERUS_RPC_SERVER_PORT: "8080"
+  #     VERUS_RPC_SERVER_ADDR: "0.0.0.0"
+  #     VERUS_RPC_API_KEYS: "your-api-key"
+  #   restart: unless-stopped
+  #   networks:
+  #     - verus-network
+  #
+  # caddy:
+  #   image: caddy:latest
+  #   container_name: verus-caddy
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+  #   restart: unless-stopped
+  #   networks:
+  #     - verus-network
+  #   depends_on:
+  #     - rpc-server-internal
+
+  # ===========================================================================
+  # Option 3: Full stack with Verus daemon (for development/testing)
+  # ===========================================================================
+
+  # Uncomment this section to run verusd in Docker alongside the RPC server
+
+  # verusd:
+  #   image: verus/verus:latest  # Replace with actual Verus Docker image
+  #   container_name: verusd
+  #   volumes:
+  #     - verus_data:/home/verus/.komodo/VRSC
+  #   ports:
+  #     - "27486:27486"  # RPC port
+  #     - "27485:27485"  # P2P port
+  #   environment:
+  #     - VERUS_RPC_USER=your_rpc_username
+  #     - VERUS_RPC_PASSWORD=your_rpc_password
+  #   restart: unless-stopped
+  #   networks:
+  #     - verus-network
+  #
+  # rpc-server-with-daemon:
+  #   image: ghcr.io/devdudeio/rust_verusd_rpc_server:latest
+  #   container_name: verus-rpc-server
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     VERUS_RPC_RPC_URL: "http://verusd:27486"  # Use service name
+  #     VERUS_RPC_RPC_USER: "your_rpc_username"
+  #     VERUS_RPC_RPC_PASSWORD: "your_rpc_password"
+  #     VERUS_RPC_SERVER_PORT: "8080"
+  #     VERUS_RPC_SERVER_ADDR: "0.0.0.0"
+  #     VERUS_RPC_API_KEYS: "your-api-key"
+  #   restart: unless-stopped
+  #   networks:
+  #     - verus-network
+  #   depends_on:
+  #     - verusd
+
+networks:
+  verus-network:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
+  verus_data:
+
+# ===========================================================================
+# Usage Instructions
+# ===========================================================================
+#
+# 1. Copy this file to docker-compose.yml:
+#    cp docker-compose.yml.example docker-compose.yml
+#
+# 2. Edit docker-compose.yml and fill in your credentials
+#
+# 3. Start the service:
+#    docker-compose up -d
+#
+# 4. Check logs:
+#    docker-compose logs -f rpc-server
+#
+# 5. Stop the service:
+#    docker-compose down
+#
+# ===========================================================================
+# Security Notes
+# ===========================================================================
+#
+# - Never commit docker-compose.yml with real credentials!
+# - Add docker-compose.yml to .gitignore
+# - Use strong, random API keys (generate with: openssl rand -hex 32)
+# - For production, always use HTTPS (Option 2 with Caddy)
+# - Configure firewall rules to restrict access
+# - Enable API key authentication (VERUS_RPC_API_KEYS)
+# - Review SECURITY.md for additional best practices
+#
+# ===========================================================================
