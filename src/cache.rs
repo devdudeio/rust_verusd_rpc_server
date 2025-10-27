@@ -22,7 +22,6 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 /// Cache entry with TTL.
-#[allow(dead_code)] // Infrastructure for response caching
 #[derive(Debug, Clone)]
 struct CacheEntry {
     /// Cached response value.
@@ -31,7 +30,6 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
-#[allow(dead_code)]
 impl CacheEntry {
     /// Check if this entry has expired.
     fn is_expired(&self) -> bool {
@@ -40,7 +38,6 @@ impl CacheEntry {
 }
 
 /// Thread-safe response cache with LRU eviction and TTL.
-#[allow(dead_code)] // Infrastructure for response caching
 pub struct ResponseCache {
     /// LRU cache storage.
     cache: Mutex<LruCache<String, CacheEntry>>,
@@ -52,7 +49,6 @@ pub struct ResponseCache {
     cacheable_methods: HashMap<String, bool>,
 }
 
-#[allow(dead_code)]
 impl ResponseCache {
     /// Create a new response cache from configuration.
     pub fn new(config: &CacheConfig) -> Self {

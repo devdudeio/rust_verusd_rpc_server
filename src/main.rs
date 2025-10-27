@@ -206,7 +206,6 @@ struct ServerConfig {
     audit_logger: audit::AuditLogger,
 
     /// Response cache for frequently requested data.
-    #[allow(dead_code)] // Infrastructure ready for future integration
     cache: Option<cache::ResponseCache>,
 
     /// Advanced rate limiter with per-method limits.
@@ -509,6 +508,7 @@ fn validate_api_key(provided_key: &str, valid_keys: &HashSet<String>) -> bool {
 /// * `server_config` - Server configuration containing API keys
 /// * `request_id` - Unique request ID for tracing
 /// * `request_origin` - Origin header from the request
+/// * `client_ip` - Client's IP address for audit logging
 ///
 /// # Returns
 ///
@@ -519,6 +519,7 @@ fn check_authentication(
     server_config: &ServerConfig,
     request_id: &str,
     request_origin: Option<&String>,
+    client_ip: IpAddr,
 ) -> Result<(), Box<Response<Full<bytes::Bytes>>>> {
     // Skip authentication for health and readiness checks
     if req.uri().path() == "/health" || req.uri().path() == "/ready" {
@@ -541,10 +542,30 @@ fn check_authentication(
         match provided_key {
             Some(key) if validate_api_key(key, api_keys) => {
                 debug!("API key authentication successful");
+
+                // Log successful authentication
+                server_config.audit_logger.log_auth(&audit::AuthEvent {
+                    request_id: request_id.to_string(),
+                    client_ip,
+                    success: true,
+                    key_name: None, // Don't log actual key for security
+                    failure_reason: None,
+                });
+
                 Ok(())
             }
             Some(_) => {
                 warn!("Invalid API key provided");
+
+                // Log failed authentication
+                server_config.audit_logger.log_auth(&audit::AuthEvent {
+                    request_id: request_id.to_string(),
+                    client_ip,
+                    success: false,
+                    key_name: None,
+                    failure_reason: Some("invalid_api_key".to_string()),
+                });
+
                 let mut response = Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .body(Full::new(bytes::Bytes::from(
@@ -573,6 +594,16 @@ fn check_authentication(
             }
             None => {
                 warn!("Missing API key");
+
+                // Log failed authentication
+                server_config.audit_logger.log_auth(&audit::AuthEvent {
+                    request_id: request_id.to_string(),
+                    client_ip,
+                    success: false,
+                    key_name: None,
+                    failure_reason: Some("missing_api_key".to_string()),
+                });
+
                 let mut response = Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .body(Full::new(bytes::Bytes::from(
@@ -908,9 +939,13 @@ async fn handle_req(
     }
 
     // Check API key authentication
-    if let Err(response) =
-        check_authentication(&req, &server_config, &request_id, request_origin.as_ref())
-    {
+    if let Err(response) = check_authentication(
+        &req,
+        &server_config,
+        &request_id,
+        request_origin.as_ref(),
+        client_ip,
+    ) {
         return Ok(*response);
     }
 
@@ -1164,7 +1199,63 @@ async fn handle_req(
     // Parse JSON and handle RPC request
     let json_body: Result<Value, _> = serde_json::from_str(&str_body);
     let result = match json_body {
-        Ok(req_body) => rpc.handle(req_body).await,
+        Ok(req_body) => {
+            // Try cache first if enabled
+            let cached_result = if let Some(ref cache) = server_config.cache {
+                // Extract method and params for cache lookup
+                req_body["method"].as_str().and_then(|method| {
+                    if !cache.is_cacheable(method) {
+                        return None;
+                    }
+
+                    // Parse params for cache key
+                    req_body["params"].as_array().and_then(|params_array| {
+                        let params_raw: Result<Vec<Box<RawValue>>, _> = params_array
+                            .iter()
+                            .map(|v| RawValue::from_string(v.to_string()))
+                            .collect();
+
+                        params_raw.ok().and_then(|params| {
+                            cache.get(method, &params).map(|value| {
+                                debug!("Cache hit for method: {}", method);
+                                Ok(value)
+                            })
+                        })
+                    })
+                })
+            } else {
+                None
+            };
+
+            // Return cached result or call RPC
+            if let Some(result) = cached_result {
+                result
+            } else {
+                // Cache miss or cache disabled - call RPC
+                let rpc_result = rpc.handle(req_body.clone()).await;
+
+                // Store successful result in cache if enabled
+                if let (Some(ref cache), Ok(ref value)) = (&server_config.cache, &rpc_result) {
+                    if let Some(method) = req_body["method"].as_str() {
+                        if cache.is_cacheable(method) {
+                            if let Some(params_array) = req_body["params"].as_array() {
+                                let params_raw: Result<Vec<Box<RawValue>>, _> = params_array
+                                    .iter()
+                                    .map(|v| RawValue::from_string(v.to_string()))
+                                    .collect();
+
+                                if let Ok(params) = params_raw {
+                                    debug!("Caching result for method: {}", method);
+                                    cache.put(method, &params, value.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                rpc_result
+            }
+        }
         Err(e) => {
             warn!("JSON parse error: {}", e);
             Err(RpcError {

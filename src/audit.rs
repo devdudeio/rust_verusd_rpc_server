@@ -58,7 +58,6 @@ impl AuditLogger {
     }
 
     /// Log an authentication attempt.
-    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_auth(&self, event: &AuthEvent) {
         if !self.config.enabled || !self.config.log_auth {
             return;
@@ -88,7 +87,6 @@ impl AuditLogger {
     }
 
     /// Log a rate limit event.
-    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_rate_limit(&self, event: &RateLimitEvent) {
         if !self.config.enabled || !self.config.log_rate_limits {
             return;
@@ -165,7 +163,6 @@ pub struct ResponseEvent {
 }
 
 /// Authentication event.
-#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthEvent {
     pub request_id: String,
@@ -176,7 +173,6 @@ pub struct AuthEvent {
 }
 
 /// Rate limit event.
-#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct RateLimitEvent {
     pub request_id: String,
