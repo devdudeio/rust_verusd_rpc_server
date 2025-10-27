@@ -85,6 +85,121 @@ const DEFAULT_RATE_LIMIT_BURST: u32 = 10;
 /// governor crate providing the rate limiting logic.
 type IpRateLimiter = RateLimiter<IpAddr, DashMap<IpAddr, InMemoryState>, DefaultClock>;
 
+/// Validates security-sensitive configuration values and warns about insecure settings.
+///
+/// This function performs various security checks on the configuration to help prevent
+/// common misconfigurations that could lead to security vulnerabilities.
+///
+/// # Arguments
+///
+/// * `rpc_user` - The RPC username
+/// * `rpc_password` - The RPC password
+/// * `api_keys` - Optional set of API keys
+/// * `cors_origins` - List of allowed CORS origins
+/// * `server_addr` - The server bind address
+///
+/// # Security Checks
+///
+/// * RPC credentials must not be default/common values
+/// * RPC password must be at least 12 characters
+/// * API keys must be at least 16 characters
+/// * Warns if API keys are not enabled in production
+/// * Warns if CORS allows all origins (*)
+/// * Warns if binding to 0.0.0.0 without API keys
+fn validate_security_configuration(
+    rpc_user: &str,
+    rpc_password: &str,
+    api_keys: &Option<HashSet<String>>,
+    cors_origins: &[String],
+    server_addr: &str,
+) {
+    // Common default credentials that should never be used
+    const COMMON_PASSWORDS: &[&str] = &[
+        "password",
+        "testpassword",
+        "test",
+        "admin",
+        "root",
+        "changeme",
+        "123456",
+        "password123",
+    ];
+
+    const COMMON_USERNAMES: &[&str] = &["testuser", "admin", "root", "test", "user"];
+
+    // Check for common/default RPC credentials
+    if COMMON_USERNAMES.contains(&rpc_user) {
+        warn!(
+            "⚠️  SECURITY WARNING: RPC username '{}' is a common default. Use a unique username for production.",
+            rpc_user
+        );
+    }
+
+    if COMMON_PASSWORDS.contains(&rpc_password) {
+        error!(
+            "🔴 CRITICAL SECURITY ISSUE: RPC password is a common default value! Change immediately!"
+        );
+    }
+
+    // Check RPC password strength
+    if rpc_password.len() < 12 {
+        warn!(
+            "⚠️  SECURITY WARNING: RPC password is only {} characters. Recommend at least 12 characters.",
+            rpc_password.len()
+        );
+    }
+
+    // Validate API keys
+    match api_keys {
+        Some(keys) => {
+            for key in keys {
+                if key.len() < 16 {
+                    warn!(
+                        "⚠️  SECURITY WARNING: API key is only {} characters. Recommend at least 16 characters for production.",
+                        key.len()
+                    );
+                }
+
+                // Check for simple/common API keys
+                if key == "test"
+                    || key == "testkey"
+                    || key == "apikey"
+                    || key == "key"
+                    || key.chars().all(|c| c.is_numeric())
+                {
+                    error!(
+                        "🔴 CRITICAL SECURITY ISSUE: API key '{}' is too simple! Use a strong, random key.",
+                        key
+                    );
+                }
+            }
+        }
+        None => {
+            if server_addr == "0.0.0.0" {
+                error!(
+                    "🔴 CRITICAL SECURITY ISSUE: Server is publicly accessible (0.0.0.0) without API key authentication!"
+                );
+                warn!("   Set api_keys in configuration to enable authentication.");
+            } else {
+                warn!("⚠️  SECURITY WARNING: API key authentication is disabled. Not recommended for production.");
+            }
+        }
+    }
+
+    // Validate CORS configuration
+    if cors_origins.len() == 1 && cors_origins[0] == "*" {
+        warn!(
+            "⚠️  SECURITY WARNING: CORS allows all origins (*). Specify exact origins for production."
+        );
+    }
+
+    // Check for public binding without authentication
+    if server_addr == "0.0.0.0" && api_keys.is_none() {
+        error!("🔴 CRITICAL: Binding to 0.0.0.0 without API keys exposes your RPC endpoint to the internet!");
+        warn!("   Either bind to 127.0.0.1 or enable API key authentication.");
+    }
+}
+
 /// Server configuration settings.
 ///
 /// Contains security and CORS settings that are shared across all request handlers.
@@ -933,6 +1048,10 @@ async fn main() -> Result<()> {
                 .collect::<Vec<String>>()
         })
         .unwrap_or_else(|| vec!["*".to_string()]);
+
+    // Validate security configuration
+    info!("Validating security configuration...");
+    validate_security_configuration(&user, &password, &api_keys, &cors_origins, &server_addr_str);
 
     let server_config = Arc::new(ServerConfig {
         api_keys: api_keys.clone(),
