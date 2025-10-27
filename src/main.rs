@@ -881,7 +881,7 @@ async fn handle_req(
     let _enter = span.enter();
 
     let path = req.uri().path();
-    info!("Incoming {} request to {}", req.method(), path);
+    debug!("Incoming {} request to {}", req.method(), path);
 
     // Extract Origin header for CORS (convert to String to avoid borrow issues)
     let request_origin = req
@@ -1269,11 +1269,11 @@ async fn handle_req(
     // Build response
     let body_bytes = match result {
         Ok(res) => {
-            info!("Request completed successfully");
+            debug!("Request completed successfully");
             bytes::Bytes::from(json!({"result": res}).to_string())
         }
         Err(err) => {
-            warn!("Request failed with error code: {}", err.code);
+            debug!("Request failed with error code: {}", err.code);
             bytes::Bytes::from(
                 json!({
                     "error": {

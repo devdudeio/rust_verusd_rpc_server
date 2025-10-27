@@ -16,7 +16,7 @@ A high-performance, secure RPC proxy server for Verus blockchain nodes written i
 
 ### Performance
 - **Request Timeout**: Configurable timeouts to prevent hanging requests (30s default)
-- **Connection Pooling**: Automatic HTTP connection reuse for upstream RPC
+- **Connection Reuse**: HTTP/1.1 keepalive for upstream RPC connections
 - **Async I/O**: Built on Tokio for maximum concurrency
 - **Response Caching**: LRU cache with TTL for frequently requested data
 
@@ -1310,6 +1310,27 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Issues: [GitHub Issues](https://github.com/devdudeio/rust_verusd_rpc_server/issues)
 - Discussions: [GitHub Discussions](https://github.com/devdudeio/rust_verusd_rpc_server/discussions)
+
+## Roadmap / Planned Features
+
+The following features are planned for future releases:
+
+### Upcoming (v0.2.0)
+- **Circuit Breaker Integration**: Automatic fail-fast when upstream is unavailable (code exists but not integrated)
+- **Additional Documentation**: More examples and deployment guides
+
+### Future Releases
+- **Connection Pooling**: Advanced connection pool management for multiple upstream nodes
+- **Per-API-Key Rate Limiting**: Individual rate limits per API key
+- **Distributed Rate Limiting**: Redis-backed rate limits for multi-instance deployments
+- **Request Transformation**: Custom middleware support for modifying requests/responses
+- **Load Balancing**: Intelligent request routing across multiple upstreams
+- **mTLS Support**: Mutual TLS for upstream communication
+- **gRPC Support**: Alternative protocol to JSON-RPC
+- **WebSocket Support**: Real-time event streaming
+- **Advanced Caching**: Adaptive TTL and intelligent invalidation strategies
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for more details on the architecture and future enhancements.
 
 ## Acknowledgments
 

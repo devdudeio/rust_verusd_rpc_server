@@ -1,0 +1,53 @@
+[Unit]
+Description=Rust Verusd RPC Proxy Server
+Documentation=https://github.com/yourusername/rust_verusd_rpc_server
+After=network.target verusd.service
+Requires=verusd.service
+
+[Service]
+Type=simple
+User=verus
+Group=verus
+WorkingDirectory=/opt/rust_verusd_rpc_server
+
+# Environment variables for configuration
+Environment="VERUS_RPC_RPC_URL=http://127.0.0.1:27486"
+Environment="VERUS_RPC_RPC_USER=your_rpc_username"
+Environment="VERUS_RPC_RPC_PASSWORD=your_rpc_password"
+Environment="VERUS_RPC_SERVER_ADDR=127.0.0.1"
+Environment="VERUS_RPC_SERVER_PORT=8080"
+Environment="VERUS_RPC_API_KEYS=your-secret-api-key-here"
+Environment="VERUS_RPC_CORS_ALLOWED_ORIGINS=https://your-frontend.com"
+Environment="VERUS_RPC_RATE_LIMIT_PER_MINUTE=60"
+Environment="VERUS_RPC_RATE_LIMIT_BURST=10"
+Environment="VERUS_RPC_METHODS_PRESET=readonly"
+Environment="RUST_LOG=info"
+
+# Alternatively, use a config file
+# Environment="CONFIG_FILE=/etc/rust_verusd_rpc_server/Conf.toml"
+
+# Start the server
+ExecStart=/opt/rust_verusd_rpc_server/rust_verusd_rpc_server
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+MemoryLimit=512M
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/rust_verusd_rpc_server
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=verusd-rpc-proxy
+
+[Install]
+WantedBy=multi-user.target
