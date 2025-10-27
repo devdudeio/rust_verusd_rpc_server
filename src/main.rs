@@ -54,7 +54,6 @@ use uuid::Uuid;
 mod allowlist;
 mod allowlist_config;
 mod audit;
-mod auth;
 mod cache;
 mod config;
 mod config_types;

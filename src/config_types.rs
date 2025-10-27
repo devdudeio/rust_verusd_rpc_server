@@ -3,7 +3,6 @@
 //! This module defines all configuration structures used by the server,
 //! including metrics, authentication, rate limiting, caching, and audit logging.
 
-use crate::allowlist_config::{MethodGroup, Preset};
 use ipnetwork::IpNetwork;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -26,38 +25,6 @@ impl Default for MetricsConfig {
             endpoint: "/metrics".to_string(),
         }
     }
-}
-
-/// API key configuration with per-key method allowlists.
-#[allow(dead_code)] // Infrastructure ready for future integration
-#[derive(Debug, Clone, Deserialize)]
-pub struct ApiKeyConfig {
-    /// The API key value.
-    pub key: String,
-
-    /// Optional name/description for this key.
-    #[serde(default)]
-    pub name: Option<String>,
-
-    /// Method allowlist preset for this key.
-    #[serde(default)]
-    pub methods_preset: Option<Preset>,
-
-    /// Custom method groups (only used if methods_preset is Custom).
-    #[serde(default)]
-    pub allow_groups: Vec<MethodGroup>,
-
-    /// Extra methods to allow (only used if methods_preset is Custom).
-    #[serde(default)]
-    pub allow_extra: Vec<String>,
-
-    /// Methods to deny (only used if methods_preset is Custom).
-    #[serde(default)]
-    pub deny: Vec<String>,
-
-    /// Custom rate limit for this key (requests per minute).
-    #[serde(default)]
-    pub rate_limit_per_minute: Option<u32>,
 }
 
 /// Method-specific rate limit configuration.
@@ -220,20 +187,6 @@ mod tests {
         let config = MetricsConfig::default();
         assert!(config.enabled);
         assert_eq!(config.endpoint, "/metrics");
-    }
-
-    #[test]
-    fn test_api_key_config_deserialize() {
-        let toml = r#"
-            key = "test-key"
-            name = "Test Key"
-            methods_preset = "safe"
-            rate_limit_per_minute = 100
-        "#;
-        let config: ApiKeyConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.key, "test-key");
-        assert_eq!(config.name, Some("Test Key".to_string()));
-        assert_eq!(config.rate_limit_per_minute, Some(100));
     }
 
     #[test]

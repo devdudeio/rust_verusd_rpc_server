@@ -104,12 +104,10 @@ impl AdvancedRateLimiter {
             let limit = limit.max(1);
             let burst = limit;
             let quota = Quota::per_minute(
-                NonZeroU32::new(limit)
-                    .expect("limit.max(1) ensures value is non-zero"),
+                NonZeroU32::new(limit).expect("limit.max(1) ensures value is non-zero"),
             )
             .allow_burst(
-                NonZeroU32::new(burst)
-                    .expect("burst=limit.max(1) ensures value is non-zero"),
+                NonZeroU32::new(burst).expect("burst=limit.max(1) ensures value is non-zero"),
             );
 
             self.method_limiters
