@@ -23,7 +23,7 @@ FROM debian:bookworm-slim
 
 # Install runtime dependencies
 RUN apt-get update && \
-    apt-get install -y ca-certificates && \
+    apt-get install -y ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -36,6 +36,12 @@ COPY Conf.toml /app/Conf.toml.example
 
 # Expose default port
 EXPOSE 8080
+
+# Health check configuration
+# Checks the /health endpoint every 30 seconds with 5 second timeout
+# Container is unhealthy after 3 consecutive failures
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Run as non-root user
 RUN useradd -m -u 1000 appuser && \
