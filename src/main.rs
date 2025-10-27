@@ -12,7 +12,12 @@ use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
 use std::num::NonZeroU32;
 use std::collections::HashSet;
-use tokio::net::TcpListener;
+use std::path::Path;
+use std::fs::File;
+use std::io::BufReader;
+use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
+use rustls_pemfile::{certs, pkcs8_private_keys};
 use tracing::{info, warn, error, debug, Span};
 use anyhow::{Result, Context, anyhow};
 use uuid::Uuid;
@@ -184,6 +189,46 @@ impl VerusRPC {
             Err(_) => Err("RPC timeout".to_string()),
         }
     }
+}
+
+/// Load TLS configuration from certificate and key files
+fn load_tls_config(cert_path: &str, key_path: &str) -> Result<tokio_rustls::rustls::ServerConfig> {
+    // Load certificate chain
+    let cert_file = File::open(cert_path)
+        .context(format!("Failed to open certificate file: {}", cert_path))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let cert_chain: Vec<tokio_rustls::rustls::pki_types::CertificateDer> = certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to parse certificate file")?;
+
+    if cert_chain.is_empty() {
+        return Err(anyhow!("No certificates found in {}", cert_path));
+    }
+
+    // Load private key
+    let key_file = File::open(key_path)
+        .context(format!("Failed to open private key file: {}", key_path))?;
+    let mut key_reader = BufReader::new(key_file);
+    let mut keys = pkcs8_private_keys(&mut key_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to parse private key file")?;
+
+    if keys.is_empty() {
+        return Err(anyhow!("No private keys found in {}", key_path));
+    }
+
+    let private_key = tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(keys.remove(0));
+
+    // Create TLS config
+    let mut config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)
+        .context("Failed to create TLS configuration")?;
+
+    // Configure ALPN for HTTP/1.1
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    Ok(config)
 }
 
 fn add_cors_and_security_headers(
@@ -637,6 +682,26 @@ async fn main() -> Result<()> {
         cors_origins: cors_origins.clone(),
     });
 
+    // Read TLS configuration
+    let tls_cert_path = settings.get_string("tls_cert_path").ok();
+    let tls_key_path = settings.get_string("tls_key_path").ok();
+
+    let tls_acceptor = match (tls_cert_path, tls_key_path) {
+        (Some(cert), Some(key)) => {
+            info!("Loading TLS configuration...");
+            let tls_config = load_tls_config(&cert, &key)
+                .context("Failed to load TLS configuration")?;
+            Some(Arc::new(TlsAcceptor::from(Arc::new(tls_config))))
+        }
+        (Some(_), None) => {
+            return Err(anyhow!("tls_cert_path provided but tls_key_path is missing"));
+        }
+        (None, Some(_)) => {
+            return Err(anyhow!("tls_key_path provided but tls_cert_path is missing"));
+        }
+        (None, None) => None,
+    };
+
     let addr = SocketAddr::from((server_addr, port as u16));
 
     info!("Connecting to RPC server at {}", url);
@@ -658,9 +723,17 @@ async fn main() -> Result<()> {
     );
     let rate_limiter = Arc::new(RateLimiter::dashmap(quota));
 
+    let protocol = if tls_acceptor.is_some() { "https" } else { "http" };
+
     info!("Server listening on {}", addr);
-    info!("Health check available at http://{}/health", addr);
+    info!("Health check available at {}://{}/health", protocol, addr);
     info!("Rate limiting: {} requests/minute with burst of {}", rate_limit_per_minute, rate_limit_burst);
+
+    if tls_acceptor.is_some() {
+        info!("TLS/HTTPS: ENABLED");
+    } else {
+        warn!("TLS/HTTPS: DISABLED - using plain HTTP (not recommended for production)");
+    }
 
     if api_keys.is_some() {
         info!("API key authentication: ENABLED");
@@ -720,28 +793,57 @@ async fn main() -> Result<()> {
 
             debug!("New connection from {}", remote_addr);
 
-            let io = TokioIo::new(stream);
             let rpc_clone = Arc::clone(&rpc);
             let rate_limiter_clone = Arc::clone(&rate_limiter);
             let server_config_clone = Arc::clone(&server_config);
             let client_ip = remote_addr.ip();
 
-            // Spawn a task to handle the connection
-            tokio::task::spawn(async move {
-                if let Err(err) = http1::Builder::new()
-                    .serve_connection(io, service_fn(move |req| {
-                        let rpc = Arc::clone(&rpc_clone);
-                        let rate_limiter = Arc::clone(&rate_limiter_clone);
-                        let server_config = Arc::clone(&server_config_clone);
-                        async move {
-                            handle_req(req, rpc, rate_limiter, client_ip, server_config).await
+            // Handle connection with or without TLS
+            if let Some(ref acceptor) = tls_acceptor {
+                // HTTPS connection
+                let acceptor_clone = Arc::clone(acceptor);
+                tokio::task::spawn(async move {
+                    match acceptor_clone.accept(stream).await {
+                        Ok(tls_stream) => {
+                            let io = TokioIo::new(tls_stream);
+                            if let Err(err) = http1::Builder::new()
+                                .serve_connection(io, service_fn(move |req| {
+                                    let rpc = Arc::clone(&rpc_clone);
+                                    let rate_limiter = Arc::clone(&rate_limiter_clone);
+                                    let server_config = Arc::clone(&server_config_clone);
+                                    async move {
+                                        handle_req(req, rpc, rate_limiter, client_ip, server_config).await
+                                    }
+                                }))
+                                .await
+                            {
+                                error!("Error serving HTTPS connection from {}: {:?}", remote_addr, err);
+                            }
                         }
-                    }))
-                    .await
-                {
-                    error!("Error serving connection from {}: {:?}", remote_addr, err);
-                }
-            });
+                        Err(err) => {
+                            error!("TLS handshake failed from {}: {:?}", remote_addr, err);
+                        }
+                    }
+                });
+            } else {
+                // HTTP connection
+                tokio::task::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    if let Err(err) = http1::Builder::new()
+                        .serve_connection(io, service_fn(move |req| {
+                            let rpc = Arc::clone(&rpc_clone);
+                            let rate_limiter = Arc::clone(&rate_limiter_clone);
+                            let server_config = Arc::clone(&server_config_clone);
+                            async move {
+                                handle_req(req, rpc, rate_limiter, client_ip, server_config).await
+                            }
+                        }))
+                        .await
+                    {
+                        error!("Error serving HTTP connection from {}: {:?}", remote_addr, err);
+                    }
+                });
+            }
         }
     };
 
