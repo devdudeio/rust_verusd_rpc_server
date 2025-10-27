@@ -1,0 +1,38 @@
+rpc_url = "RPC_URL:PORT"
+rpc_user = "RPC_USER"
+rpc_password = "RPC_PASSWORD"
+
+server_port = SERVER_PORT
+server_addr = "ADDRESS_TO_BIND_TO"
+
+# Request timeout in seconds (optional, defaults to 30)
+# request_timeout = 30
+
+# Rate limiting configuration (optional)
+# Maximum requests per IP per minute (defaults to 60)
+# rate_limit_per_minute = 60
+# Maximum burst size (defaults to 10)
+# rate_limit_burst = 10
+
+# API key authentication (optional)
+# Comma-separated list of valid API keys
+# If not set, authentication is disabled (not recommended for production)
+# api_keys = "key1,key2,key3"
+
+# CORS configuration (optional)
+# Comma-separated list of allowed origins (defaults to "*")
+# For production, specify exact origins like "https://example.com,https://app.example.com"
+# cors_allowed_origins = "*"
+
+# TLS/HTTPS configuration (optional)
+# If both cert_path and key_path are provided, server will use HTTPS
+# Otherwise, it will use HTTP (not recommended for production)
+# tls_cert_path = "/path/to/cert.pem"
+# tls_key_path = "/path/to/key.pem"
+
+# Response cache configuration (optional)
+# TTL for cached responses in seconds (defaults to 60)
+# Only applies to read-only RPC methods
+# cache_ttl_seconds = 60
+# Maximum number of cached items (defaults to 1000)
+# cache_max_capacity = 1000
