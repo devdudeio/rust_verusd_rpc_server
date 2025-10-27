@@ -10,8 +10,9 @@ use serde_json::value::RawValue;
 use std::sync::Arc;
 use std::net::{SocketAddr, IpAddr};
 use tokio::net::TcpListener;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, error, debug, Span};
 use anyhow::{Result, Context, anyhow};
+use uuid::Uuid;
 
 mod allowlist;
 
@@ -166,11 +167,21 @@ async fn handle_req(
     req: Request<hyper::body::Incoming>,
     rpc: Arc<VerusRPC>
 ) -> Result<Response<Full<bytes::Bytes>>> {
+    // Generate request ID for correlation
+    let request_id = Uuid::new_v4().to_string();
+    let span = tracing::info_span!("request", request_id = %request_id);
+    let _enter = span.enter();
+
+    info!("Incoming {} request to {}", req.method(), req.uri().path());
 
     // Health check endpoint
     if req.uri().path() == "/health" {
         debug!("Health check request");
         let mut response = Response::new(Full::new(bytes::Bytes::from("OK")));
+        response.headers_mut().insert(
+            "X-Request-ID",
+            request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+        );
         add_cors_headers(&mut response);
         return Ok(response);
     }
@@ -179,8 +190,51 @@ async fn handle_req(
     if req.method() == hyper::Method::OPTIONS {
         debug!("CORS preflight request");
         let mut response = Response::new(Full::new(bytes::Bytes::new()));
+        response.headers_mut().insert(
+            "X-Request-ID",
+            request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+        );
         add_cors_headers(&mut response);
         return Ok(response);
+    }
+
+    // Validate Content-Type header for POST requests
+    if req.method() == hyper::Method::POST {
+        let content_type = req.headers()
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+
+        match content_type {
+            Some(ct) if ct.starts_with("application/json") => {
+                debug!("Valid Content-Type: {}", ct);
+            }
+            Some(ct) => {
+                warn!("Invalid Content-Type: {}, expected application/json", ct);
+                let mut response = Response::builder()
+                    .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                    .body(Full::new(bytes::Bytes::from("Content-Type must be application/json")))
+                    .context("Failed to build response")?;
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                );
+                add_cors_headers(&mut response);
+                return Ok(response);
+            }
+            None => {
+                warn!("Missing Content-Type header");
+                let mut response = Response::builder()
+                    .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                    .body(Full::new(bytes::Bytes::from("Content-Type header required")))
+                    .context("Failed to build response")?;
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                );
+                add_cors_headers(&mut response);
+                return Ok(response);
+            }
+        }
     }
 
     // Check content length
@@ -193,6 +247,10 @@ async fn handle_req(
                         .status(StatusCode::PAYLOAD_TOO_LARGE)
                         .body(Full::new(bytes::Bytes::from("Payload too large")))
                         .context("Failed to build response")?;
+                    response.headers_mut().insert(
+                        "X-Request-ID",
+                        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                    );
                     add_cors_headers(&mut response);
                     return Ok(response);
                 }
@@ -208,7 +266,7 @@ async fn handle_req(
     let str_body = String::from_utf8(whole_body.to_vec())
         .context("Request body is not valid UTF-8")?;
 
-    debug!("Received request body");
+    debug!("Received request body ({} bytes)", str_body.len());
 
     // Parse JSON and handle RPC request
     let json_body: Result<Value, _> = serde_json::from_str(&str_body);
@@ -227,11 +285,11 @@ async fn handle_req(
     // Build response
     let body_bytes = match result {
         Ok(res) => {
-            debug!("Request successful");
+            info!("Request completed successfully");
             bytes::Bytes::from(json!({"result": res}).to_string())
         }
         Err(err) => {
-            debug!("Request failed with error code: {}", err.code);
+            warn!("Request failed with error code: {}", err.code);
             bytes::Bytes::from(json!({
                 "error": {
                     "code": err.code,
@@ -242,6 +300,10 @@ async fn handle_req(
     };
 
     let mut response = Response::new(Full::new(body_bytes));
+    response.headers_mut().insert(
+        "X-Request-ID",
+        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+    );
     add_cors_headers(&mut response);
     Ok(response)
 }
