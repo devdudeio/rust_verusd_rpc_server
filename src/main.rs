@@ -9,6 +9,7 @@ use jsonrpc::simple_http::{self, SimpleHttpTransport};
 use serde_json::value::RawValue;
 use std::sync::Arc;
 use std::net::{SocketAddr, IpAddr};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{info, warn, error, debug, Span};
 use anyhow::{Result, Context, anyhow};
@@ -18,21 +19,26 @@ mod allowlist;
 
 // Configuration constants
 const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 50; // 50 MiB
+const DEFAULT_REQUEST_TIMEOUT: u64 = 30; // seconds
 
 struct VerusRPC {
     client: Client,
+    timeout: Duration,
 }
 
 impl VerusRPC {
-    fn new(url: &str, user: &str, pass: &str) -> Result<VerusRPC, simple_http::Error> {
+    fn new(url: &str, user: &str, pass: &str, timeout: Duration) -> Result<VerusRPC, simple_http::Error> {
         let transport = SimpleHttpTransport::builder()
             .url(url)?
             .auth(user, Some(pass))
             .build();
-        Ok(VerusRPC { client: Client::with_transport(transport) })
+        Ok(VerusRPC {
+            client: Client::with_transport(transport),
+            timeout,
+        })
     }
 
-    fn handle(&self, req_body: Value) -> Result<Value, RpcError> {
+    async fn handle(&self, req_body: Value) -> Result<Value, RpcError> {
         let method = match req_body["method"].as_str() {
             Some(method) => method,
             None => {
@@ -109,7 +115,17 @@ impl VerusRPC {
 
         let request = self.client.build_request(method, &params);
 
-        let response = self.client.send_request(request).map_err(|e| {
+        // Wrap RPC call with timeout
+        let response = tokio::time::timeout(self.timeout, async {
+            self.client.send_request(request)
+        }).await.map_err(|_| {
+            error!("RPC request timed out after {:?}", self.timeout);
+            RpcError {
+                code: -32603,
+                message: format!("Request timed out after {:?}", self.timeout),
+                data: None
+            }
+        })?.map_err(|e| {
             error!("RPC request failed: {:?}", e);
             match e {
                 jsonrpc::Error::Rpc(rpc_error) => rpc_error,
@@ -135,6 +151,22 @@ impl VerusRPC {
 
         debug!("RPC request successful");
         Ok(result)
+    }
+
+    /// Health check that verifies RPC connectivity
+    async fn health_check(&self) -> Result<(), String> {
+        let check_request = json!({
+            "method": "getinfo",
+            "params": []
+        });
+
+        match tokio::time::timeout(self.timeout, async {
+            self.handle(check_request).await
+        }).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!("RPC error: {}", e.message)),
+            Err(_) => Err("RPC timeout".to_string()),
+        }
     }
 }
 
@@ -201,7 +233,20 @@ async fn handle_req(
     // Health check endpoint
     if req.uri().path() == "/health" {
         debug!("Health check request");
-        let mut response = Response::new(Full::new(bytes::Bytes::from("OK")));
+
+        let health_status = match rpc.health_check().await {
+            Ok(()) => json!({
+                "status": "healthy",
+                "rpc": "connected"
+            }),
+            Err(e) => json!({
+                "status": "unhealthy",
+                "rpc": "disconnected",
+                "error": e
+            })
+        };
+
+        let mut response = Response::new(Full::new(bytes::Bytes::from(health_status.to_string())));
         response.headers_mut().insert(
             "X-Request-ID",
             request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
@@ -295,7 +340,7 @@ async fn handle_req(
     // Parse JSON and handle RPC request
     let json_body: Result<Value, _> = serde_json::from_str(&str_body);
     let result = match json_body {
-        Ok(req_body) => rpc.handle(req_body),
+        Ok(req_body) => rpc.handle(req_body).await,
         Err(e) => {
             warn!("JSON parse error: {}", e);
             Err(RpcError {
@@ -317,7 +362,8 @@ async fn handle_req(
             bytes::Bytes::from(json!({
                 "error": {
                     "code": err.code,
-                    "message": err.message
+                    "message": err.message,
+                    "request_id": &request_id
                 }
             }).to_string())
         }
@@ -328,7 +374,7 @@ async fn handle_req(
         "X-Request-ID",
         request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
     );
-    add_cors_headers(&mut response);
+    add_cors_and_security_headers(&mut response);
     Ok(response)
 }
 
@@ -344,11 +390,17 @@ async fn main() -> Result<()> {
 
     info!("Starting Rust Verusd RPC Server");
 
-    // Load configuration
+    // Load configuration from file and environment variables
+    // Environment variables must be prefixed with VERUS_RPC_ and use uppercase
+    // Example: VERUS_RPC_RPC_URL, VERUS_RPC_SERVER_PORT
     let settings = config::Config::builder()
         .add_source(config::File::with_name("Conf"))
+        .add_source(
+            config::Environment::with_prefix("VERUS_RPC")
+                .separator("_")
+        )
         .build()
-        .context("Failed to load configuration file")?;
+        .context("Failed to load configuration")?;
 
     // Read and validate configuration
     let url = settings.get_string("rpc_url")
@@ -400,13 +452,19 @@ async fn main() -> Result<()> {
     let server_addr = server_addr_str.parse::<IpAddr>()
         .context("Invalid server_addr: must be a valid IP address")?;
 
+    // Read request timeout from configuration with default
+    let timeout_secs = settings.get_int("request_timeout")
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT as i64);
+    let timeout = Duration::from_secs(timeout_secs as u64);
+
     let addr = SocketAddr::from((server_addr, port as u16));
 
     info!("Connecting to RPC server at {}", url);
+    info!("Request timeout set to {} seconds", timeout_secs);
 
     // Create and validate RPC client
     let rpc = Arc::new(
-        VerusRPC::new(&url, &user, &password)
+        VerusRPC::new(&url, &user, &password, timeout)
             .context("Failed to create RPC client")?
     );
 

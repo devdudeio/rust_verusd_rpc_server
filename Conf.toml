@@ -4,3 +4,6 @@ rpc_password = "RPC_PASSWORD"
 
 server_port = SERVER_PORT
 server_addr = "ADDRESS_TO_BIND_TO"
+
+# Request timeout in seconds (optional, defaults to 30)
+# request_timeout = 30
