@@ -6,22 +6,27 @@ A high-performance, secure RPC proxy server for Verus blockchain nodes written i
 
 ### Security
 - **API Key Authentication**: Protect your RPC endpoint with multiple API keys
-- **Rate Limiting**: Per-IP rate limiting to prevent DDoS attacks (60 req/min default)
+- **Advanced Rate Limiting**: Per-IP global + per-method rate limiting with configurable limits
+- **IP Access Control**: Allowlist/blocklist with CIDR notation support
 - **Reverse Proxy Ready**: Designed to work behind Caddy/nginx for HTTPS termination
 - **Configurable CORS**: Control which origins can access your API
 - **Input Validation**: Strict parameter validation to prevent injection attacks
 - **Method Allowlist**: Only approved RPC methods are forwarded
+- **Audit Logging**: Comprehensive security event logging for compliance
 
 ### Performance
 - **Request Timeout**: Configurable timeouts to prevent hanging requests (30s default)
 - **Connection Pooling**: Automatic HTTP connection reuse for upstream RPC
 - **Async I/O**: Built on Tokio for maximum concurrency
+- **Response Caching**: LRU cache with TTL for frequently requested data
 
 ### Operations
 - **Health Checks**: `/health` endpoint for liveness probes
 - **Readiness Checks**: `/ready` endpoint for Kubernetes readiness probes
+- **Prometheus Metrics**: `/metrics` endpoint with comprehensive observability
 - **Docker Health Monitoring**: Built-in HEALTHCHECK directive
 - **Structured Logging**: Request tracing with unique request IDs
+- **Audit Logging**: Configurable security event logging
 - **Graceful Shutdown**: SIGTERM/SIGINT handling with connection draining
 - **Environment Variables**: Full configuration via environment variables
 - **Docker Support**: Production-ready Docker image with security best practices
@@ -121,6 +126,71 @@ preset = "safe"
 
 # When preset = "custom", deny specific methods (takes precedence):
 # deny = ["fundrawtransaction"]
+
+# Optional: Prometheus metrics
+[metrics]
+enabled = true          # Enable metrics collection (default: true)
+endpoint = "/metrics"   # Metrics endpoint path (default: "/metrics")
+
+# Optional: Per-method rate limiting
+[method_rate_limits]
+default = 60  # Default limit for all methods (requests/minute)
+
+# Per-method limits (override default)
+[method_rate_limits.methods]
+getblock = 10            # Expensive operations get lower limits
+getrawtransaction = 20
+getaddressbalance = 30
+
+# Optional: IP access control (allowlist/blocklist)
+[ip_access]
+# Allowlist: If not empty, ONLY these IPs/networks are allowed
+allowlist = [
+    "192.168.1.0/24",    # Local network
+    "10.0.0.0/8",        # Private network
+    "203.0.113.5/32"     # Specific IP
+]
+
+# Blocklist: Always denied, even if in allowlist
+blocklist = [
+    "192.168.1.100/32",  # Blocked specific IP
+    "198.51.100.0/24"    # Blocked network
+]
+
+# Optional: Audit logging for security events
+[audit]
+enabled = true              # Enable audit logging (default: false)
+log_requests = true         # Log all RPC requests (can be verbose)
+log_responses = false       # Log response bodies (can be very large)
+log_errors = true           # Log errors (recommended)
+log_auth = true             # Log authentication attempts
+log_rate_limits = true      # Log rate limit hits
+
+# Optional: Response caching
+[cache]
+enabled = true              # Enable response caching (default: false)
+ttl_seconds = 10            # Default TTL for cached responses
+max_entries = 1000          # Maximum cache entries (LRU eviction)
+
+# Methods to cache (only idempotent read operations)
+methods = [
+    "getinfo",
+    "getblockcount",
+    "getdifficulty",
+    "getbestblockhash"
+]
+
+# Per-method TTL overrides (in seconds)
+[cache.method_ttl]
+getinfo = 5                 # Cache for 5 seconds
+getblockcount = 2           # Cache for 2 seconds
+getdifficulty = 30          # Cache for 30 seconds
+
+# Optional: Upstream connection configuration
+[upstream]
+max_connections = 100       # Maximum concurrent connections
+connection_timeout_ms = 5000    # Connection timeout
+keep_alive_timeout_ms = 90000   # Keep-alive timeout
 
 # Note: For HTTPS, use Caddy or nginx as a reverse proxy
 # See the "HTTPS with Caddy" section below
@@ -637,6 +707,463 @@ Beyond allowlisting, the server validates:
 - **Security constraints**: String length limits, array size limits, numeric ranges
 
 For the complete list of methods and validation rules, see `src/allowlist.rs` and `src/allowlist_config.rs`.
+
+## Prometheus Metrics
+
+The server exposes Prometheus-compatible metrics at the `/metrics` endpoint for comprehensive observability.
+
+### Available Metrics
+
+**HTTP Metrics:**
+- `http_requests_total` - Total HTTP requests by endpoint, method, and status code
+- `http_request_duration_seconds` - HTTP request latency histogram
+- `active_connections` - Current number of active connections
+
+**RPC Metrics:**
+- `rpc_calls_total` - Total RPC calls by method and status
+- `rpc_call_duration_seconds` - RPC call latency histogram by method
+
+**Rate Limiting:**
+- `rate_limit_hits_total` - Rate limit violations by IP and limit type
+
+**Authentication:**
+- `auth_attempts_total` - Authentication attempts by status (success/failure)
+- `method_rejections_total` - Method allowlist rejections by method
+
+**Errors:**
+- `errors_total` - Errors by type and method
+- `upstream_errors_total` - Upstream RPC errors by error code
+
+**Caching (when enabled):**
+- `cache_operations_total` - Cache operations (hit/miss/expired) by method
+- `cache_size` - Current number of cache entries
+
+**System:**
+- `uptime_seconds` - Server uptime in seconds
+- `request_size_bytes_total` - Total bytes received in requests
+- `response_size_bytes_total` - Total bytes sent in responses
+
+### Configuration
+
+```toml
+[metrics]
+enabled = true          # Enable metrics (default: true)
+endpoint = "/metrics"   # Endpoint path (default: "/metrics")
+```
+
+### Accessing Metrics
+
+```bash
+# Fetch metrics
+curl http://localhost:8080/metrics
+
+# Example output:
+# http_requests_total{endpoint="/",method="POST",status="200"} 1523
+# rpc_calls_total{method="getinfo",status="success"} 1245
+# rpc_call_duration_seconds_bucket{method="getblock",le="0.1"} 892
+```
+
+### Prometheus Configuration
+
+Add this to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'verus_rpc'
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+```
+
+### Grafana Dashboard
+
+Create custom dashboards to visualize:
+- Request rate and latency percentiles
+- Error rates by method
+- Rate limit violations
+- Cache hit rates
+- Active connections over time
+
+## Advanced Rate Limiting
+
+The server implements hierarchical rate limiting with both global per-IP limits and per-method limits.
+
+### How It Works
+
+1. **Global Limit** (always checked first):
+   - Applied per IP address
+   - Prevents individual IPs from overwhelming the server
+   - Default: 60 requests/minute with burst of 10
+
+2. **Per-Method Limits** (checked second):
+   - Applied per IP per method
+   - Allows fine-grained control for expensive operations
+   - Only active for methods explicitly configured
+
+3. **Hierarchical Enforcement**:
+   - Global limit checked first
+   - If passed, method-specific limit checked (if configured)
+   - Request rejected if either limit is exceeded
+
+### Configuration
+
+```toml
+# Global limits (per IP)
+rate_limit_per_minute = 60   # Base rate
+rate_limit_burst = 10         # Burst capacity
+
+# Per-method limits
+[method_rate_limits]
+default = 60  # Fallback for methods without specific limits
+
+[method_rate_limits.methods]
+getblock = 10                 # Heavy operation
+getrawtransaction = 20
+getaddressbalance = 30
+getaddressutxos = 30
+```
+
+### Example Scenarios
+
+**Scenario 1: Normal usage**
+- Client makes 5 `getinfo` requests/minute → ✅ Allowed (under global limit)
+
+**Scenario 2: Method-specific limit**
+- Client makes 15 `getblock` requests/minute → ❌ Blocked (exceeds method limit of 10)
+- But can still make other requests (global limit not exceeded)
+
+**Scenario 3: Global limit**
+- Client makes 65 total requests/minute → ❌ Blocked (exceeds global limit)
+- Even if each method is under its specific limit
+
+### Rate Limit Response
+
+When rate limited, clients receive:
+
+```json
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60
+
+{
+  "error": {
+    "code": -32005,
+    "message": "Rate limit exceeded. Please try again later.",
+    "request_id": "uuid-here"
+  }
+}
+```
+
+### Monitoring
+
+Track rate limit hits via Prometheus metrics:
+```
+rate_limit_hits_total{ip="192.168.1.100",limit_type="global"} 5
+rate_limit_hits_total{ip="192.168.1.100",limit_type="method_getblock"} 3
+```
+
+## IP Access Control
+
+Fine-grained IP-based access control using CIDR notation for allowlisting and blocklisting.
+
+### Configuration
+
+```toml
+[ip_access]
+# Allowlist: If not empty, ONLY these IPs/networks can access
+allowlist = [
+    "192.168.1.0/24",      # Local network
+    "10.0.0.0/8",          # Private network
+    "203.0.113.5/32",      # Specific IP
+    "2001:db8::/32"        # IPv6 network
+]
+
+# Blocklist: Always denied, even if in allowlist
+blocklist = [
+    "192.168.1.100/32",    # Blocked IP within allowed network
+    "198.51.100.0/24"      # Blocked network
+]
+```
+
+### Logic
+
+1. **Blocklist takes precedence** - IPs in blocklist are always denied
+2. **Empty allowlist = allow all** - If allowlist is empty, all IPs allowed (except blocked)
+3. **Non-empty allowlist = deny by default** - If allowlist has entries, only those IPs allowed
+4. **CIDR notation** - Use `/32` for single IPs, `/24` for networks, etc.
+
+### Use Cases
+
+**Public endpoint with exceptions:**
+```toml
+[ip_access]
+# Allow everyone
+allowlist = []
+# Block known bad actors
+blocklist = ["198.51.100.0/24"]
+```
+
+**Private network only:**
+```toml
+[ip_access]
+# Only local networks
+allowlist = ["192.168.0.0/16", "10.0.0.0/8"]
+blocklist = []
+```
+
+**Allow specific IPs, block one:**
+```toml
+[ip_access]
+# Allow office network
+allowlist = ["203.0.113.0/24"]
+# Block one problematic IP
+blocklist = ["203.0.113.50/32"]
+```
+
+### Health Endpoints Exempt
+
+The `/health`, `/ready`, and `/metrics` endpoints bypass IP filtering for monitoring.
+
+### Denial Response
+
+```json
+HTTP/1.1 403 Forbidden
+
+{
+  "error": {
+    "code": -32002,
+    "message": "Access denied: IP 198.51.100.5 is in blocklist",
+    "request_id": "uuid-here"
+  }
+}
+```
+
+## Audit Logging
+
+Comprehensive security event logging for compliance and forensics.
+
+### Configuration
+
+```toml
+[audit]
+enabled = true              # Master switch (default: false)
+log_requests = true         # Log all RPC requests (verbose)
+log_responses = false       # Log response bodies (very verbose)
+log_errors = true           # Log errors (recommended)
+log_auth = true             # Log authentication attempts
+log_rate_limits = true      # Log rate limit violations
+```
+
+### Log Format
+
+All audit logs use structured logging with consistent fields:
+
+```json
+{
+  "level": "warn",
+  "timestamp": "2025-10-27T19:45:23.123Z",
+  "target": "audit",
+  "event_type": "authentication",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "client_ip": "192.168.1.100",
+  "success": false,
+  "reason": "invalid_key",
+  "message": "Authentication failed"
+}
+```
+
+### Event Types
+
+**Authentication Events:**
+```
+event_type = "authentication"
+- Logs all auth attempts (success/failure)
+- Includes key name (if successful) or failure reason
+```
+
+**Rate Limit Events:**
+```
+event_type = "rate_limit"
+- Logs when clients hit rate limits
+- Includes IP and limit type (global or method-specific)
+```
+
+**Error Events:**
+```
+event_type = "error"
+- Logs RPC errors
+- Includes error type, code, method, and message
+```
+
+**Method Rejection Events:**
+```
+event_type = "method_rejection"
+- Logs when methods are blocked by allowlist
+- Includes method name and rejection reason
+```
+
+**Request/Response Events (verbose):**
+```
+event_type = "rpc_request" | "rpc_response"
+- Logs full request/response details
+- Can be very verbose, use sparingly
+```
+
+### Use Cases
+
+**Compliance:**
+```toml
+[audit]
+enabled = true
+log_requests = true      # Track all API usage
+log_responses = false    # Avoid logging sensitive data
+log_errors = true
+log_auth = true          # Track who accessed what
+log_rate_limits = true
+```
+
+**Debugging:**
+```toml
+[audit]
+enabled = true
+log_requests = true
+log_responses = true     # Full request/response logging
+log_errors = true
+log_auth = true
+log_rate_limits = true
+```
+
+**Security monitoring:**
+```toml
+[audit]
+enabled = true
+log_requests = false     # Reduce noise
+log_responses = false
+log_errors = true
+log_auth = true          # Track suspicious activity
+log_rate_limits = true   # Track abuse attempts
+```
+
+### Log Aggregation
+
+Integrate with:
+- **ELK Stack** (Elasticsearch, Logstash, Kibana)
+- **Splunk**
+- **Datadog**
+- **CloudWatch Logs**
+- **Grafana Loki**
+
+All audit logs include `request_id` for correlation.
+
+## Response Caching
+
+LRU (Least Recently Used) cache with TTL for frequently requested data.
+
+### Configuration
+
+```toml
+[cache]
+enabled = true              # Enable caching
+ttl_seconds = 10            # Default TTL
+max_entries = 1000          # Max cache size (LRU eviction)
+
+# Only cache safe, idempotent operations
+methods = [
+    "getinfo",
+    "getblockcount",
+    "getdifficulty",
+    "getbestblockhash"
+]
+
+# Per-method TTL overrides
+[cache.method_ttl]
+getinfo = 5                 # Short TTL for rapidly changing data
+getblockcount = 2
+getdifficulty = 30          # Longer TTL for stable data
+```
+
+### How It Works
+
+1. **Cache Key**: `method:params` (exact match required)
+2. **TTL Expiration**: Entries auto-expire after configured TTL
+3. **LRU Eviction**: When full, least recently used entries evicted
+4. **Thread-Safe**: Lock-free reads, efficient writes
+
+### Cache Behavior
+
+**Cache Hit:**
+```
+Client → Server: getinfo request
+Server: Cache HIT (returns cached response in <1ms)
+```
+
+**Cache Miss:**
+```
+Client → Server: getinfo request
+Server: Cache MISS → Forward to verusd → Cache response → Return
+```
+
+**Cache Expired:**
+```
+Client → Server: getinfo request
+Server: Cache HIT but expired → Forward to verusd → Update cache → Return
+```
+
+### Best Practices
+
+**✅ Good to cache:**
+- `getinfo` (network info)
+- `getblockcount` (chain height)
+- `getdifficulty` (network difficulty)
+- `getbestblockhash` (latest block hash)
+- `getblockchaininfo` (blockchain state)
+
+**❌ Don't cache:**
+- `sendrawtransaction` (state-changing)
+- `getrawmempool` (rapidly changing)
+- `getaddressbalance` (user-specific, privacy)
+- Any method with user-specific data
+
+**TTL Guidelines:**
+- **1-5s**: Rapidly changing data (mempool, recent blocks)
+- **10-30s**: Moderate change rate (difficulty, network info)
+- **60s+**: Stable data (old blocks, historical data)
+
+### Monitoring
+
+Track cache performance via Prometheus:
+```
+cache_operations_total{operation="hit",method="getinfo"} 8923
+cache_operations_total{operation="miss",method="getinfo"} 123
+cache_operations_total{operation="expired",method="getinfo"} 45
+cache_size 847
+```
+
+**Hit Rate Calculation:**
+```
+hit_rate = hits / (hits + misses)
+```
+
+### Example Configuration
+
+**High-traffic public endpoint:**
+```toml
+[cache]
+enabled = true
+ttl_seconds = 5
+max_entries = 10000
+methods = ["getinfo", "getblockcount", "getdifficulty", "getbestblockhash"]
+
+[cache.method_ttl]
+getinfo = 2
+getblockcount = 1
+```
+
+**Internal service:**
+```toml
+[cache]
+enabled = false  # Disable for internal services that need real-time data
+```
 
 ## Troubleshooting
 
