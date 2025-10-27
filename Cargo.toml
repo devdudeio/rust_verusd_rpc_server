@@ -14,3 +14,4 @@ config = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
+once_cell = "1.19"
