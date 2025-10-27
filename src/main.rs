@@ -622,8 +622,8 @@ async fn handle_req(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Check API key authentication (skip health checks)
-    if req.uri().path() != "/health" {
+    // Check API key authentication (skip health and readiness checks)
+    if req.uri().path() != "/health" && req.uri().path() != "/ready" {
         if let Some(ref api_keys) = server_config.api_keys {
             // Extract API key from headers (X-API-Key or Authorization: Bearer)
             let provided_key = req
@@ -698,8 +698,8 @@ async fn handle_req(
         }
     }
 
-    // Check rate limit for this IP (skip health checks)
-    if req.uri().path() != "/health" {
+    // Check rate limit for this IP (skip health and readiness checks)
+    if req.uri().path() != "/health" && req.uri().path() != "/ready" {
         match rate_limiter.check_key(&client_ip) {
             Ok(_) => {
                 debug!("Rate limit check passed for IP {}", client_ip);
@@ -738,7 +738,7 @@ async fn handle_req(
         }
     }
 
-    // Health check endpoint
+    // Health check endpoint - checks if the application is alive
     if req.uri().path() == "/health" {
         debug!("Health check request");
 
@@ -755,6 +755,59 @@ async fn handle_req(
         };
 
         let mut response = Response::new(Full::new(bytes::Bytes::from(health_status.to_string())));
+        response.headers_mut().insert(
+            "X-Request-ID",
+            request_id
+                .parse()
+                .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+        );
+        add_cors_and_security_headers(
+            &mut response,
+            &server_config.cors_origins,
+            request_origin.as_ref(),
+        );
+        return Ok(response);
+    }
+
+    // Readiness check endpoint - checks if the application is ready to accept traffic
+    if req.uri().path() == "/ready" {
+        debug!("Readiness check request");
+
+        // Check if RPC connection is working and responsive
+        let ready_status = match rpc.health_check().await {
+            Ok(()) => json!({
+                "status": "ready",
+                "rpc": "ready"
+            }),
+            Err(e) => {
+                // Return 503 Service Unavailable if not ready
+                let mut response = Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(Full::new(bytes::Bytes::from(
+                        json!({
+                            "status": "not_ready",
+                            "rpc": "not_ready",
+                            "error": e
+                        })
+                        .to_string(),
+                    )))
+                    .context("Failed to build readiness response")?;
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+                );
+                add_cors_and_security_headers(
+                    &mut response,
+                    &server_config.cors_origins,
+                    request_origin.as_ref(),
+                );
+                return Ok(response);
+            }
+        };
+
+        let mut response = Response::new(Full::new(bytes::Bytes::from(ready_status.to_string())));
         response.headers_mut().insert(
             "X-Request-ID",
             request_id
@@ -1079,7 +1132,11 @@ async fn main() -> Result<()> {
     let rate_limiter = Arc::new(RateLimiter::dashmap(quota));
 
     info!("Server listening on {}", addr);
-    info!("Health check available at http://{}/health", addr);
+    info!("Health check (liveness) available at http://{}/health", addr);
+    info!(
+        "Readiness check available at http://{}/ready",
+        addr
+    );
     info!(
         "Rate limiting: {} requests/minute with burst of {}",
         rate_limit_per_minute, rate_limit_burst
