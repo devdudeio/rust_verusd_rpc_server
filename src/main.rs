@@ -33,11 +33,7 @@
 //! cargo run
 //! ```
 
-use anyhow::{anyhow, Context, Result};
-use dashmap::DashMap;
-use governor::clock::DefaultClock;
-use governor::state::InMemoryState;
-use governor::{Quota, RateLimiter};
+use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -49,7 +45,6 @@ use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -58,33 +53,19 @@ use uuid::Uuid;
 
 mod allowlist;
 mod allowlist_config;
+mod audit;
+mod auth;
+mod cache;
+mod config;
+mod config_types;
+mod ip_filter;
+mod metrics;
+mod rate_limit;
 
 /// Maximum allowed request body size in bytes (50 MiB).
 ///
 /// Requests larger than this will be rejected with a 413 Payload Too Large error.
 const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 50;
-
-/// Default timeout for RPC requests in seconds.
-///
-/// Can be overridden via the `request_timeout` configuration option.
-const DEFAULT_REQUEST_TIMEOUT: u64 = 30;
-
-/// Default maximum requests per IP address per minute.
-///
-/// Can be overridden via the `rate_limit_per_minute` configuration option.
-const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 60;
-
-/// Default burst capacity for rate limiting.
-///
-/// Allows brief spikes above the rate limit. Can be overridden via the
-/// `rate_limit_burst` configuration option.
-const DEFAULT_RATE_LIMIT_BURST: u32 = 10;
-
-/// Per-IP rate limiter using the token bucket algorithm.
-///
-/// Uses `DashMap` for concurrent access across multiple async tasks, with the
-/// governor crate providing the rate limiting logic.
-type IpRateLimiter = RateLimiter<IpAddr, DashMap<IpAddr, InMemoryState>, DefaultClock>;
 
 /// Validates security-sensitive configuration values and warns about insecure settings.
 ///
@@ -203,9 +184,9 @@ fn validate_security_configuration(
 
 /// Server configuration settings.
 ///
-/// Contains security and CORS settings that are shared across all request handlers.
+/// Contains all shared systems and configuration for request handlers.
 struct ServerConfig {
-    /// Optional set of valid API keys for authentication.
+    /// Optional set of valid API keys for authentication (legacy mode).
     ///
     /// If `None`, API key authentication is disabled (not recommended for production).
     /// If `Some`, requests must include a valid key via the `X-API-Key` header or
@@ -217,6 +198,18 @@ struct ServerConfig {
     /// Can contain exact origins like `"https://example.com"` or `"*"` to allow all.
     /// For security, wildcard should only be used in development.
     cors_origins: Vec<String>,
+
+    /// IP access filter for allowlist/blocklist.
+    ip_filter: ip_filter::IpFilter,
+
+    /// Audit logger for security events.
+    audit_logger: audit::AuditLogger,
+
+    /// Response cache for frequently requested data.
+    cache: Option<cache::ResponseCache>,
+
+    /// Advanced rate limiter with per-method limits.
+    rate_limiter: rate_limit::AdvancedRateLimiter,
 }
 
 /// JSON-RPC client wrapper for communicating with the Verus daemon.
@@ -611,13 +604,13 @@ fn check_authentication(
     }
 }
 
-/// Checks rate limiting for a client IP address.
+/// Checks rate limiting for a client IP address with optional per-method limits.
 ///
 /// # Arguments
 ///
 /// * `req` - The HTTP request
-/// * `rate_limiter` - Rate limiter instance
 /// * `client_ip` - Client's IP address
+/// * `method` - Optional RPC method name for per-method rate limiting
 /// * `request_id` - Unique request ID for tracing
 /// * `server_config` - Server configuration
 /// * `request_origin` - Origin header from the request
@@ -628,24 +621,41 @@ fn check_authentication(
 /// * `Err(Response)` - Rate limit exceeded, returns error response
 fn check_rate_limit(
     req: &Request<hyper::body::Incoming>,
-    rate_limiter: &IpRateLimiter,
     client_ip: IpAddr,
+    method: Option<&str>,
     request_id: &str,
     server_config: &ServerConfig,
     request_origin: Option<&String>,
 ) -> Result<(), Box<Response<Full<bytes::Bytes>>>> {
-    // Skip rate limiting for health and readiness checks
-    if req.uri().path() == "/health" || req.uri().path() == "/ready" {
+    // Skip rate limiting for health, readiness, and metrics checks
+    let path = req.uri().path();
+    if path == "/health" || path == "/ready" || path == "/metrics" {
         return Ok(());
     }
 
-    match rate_limiter.check_key(&client_ip) {
+    match server_config.rate_limiter.check(client_ip, method) {
         Ok(_) => {
-            debug!("Rate limit check passed for IP {}", client_ip);
+            debug!(
+                "Rate limit check passed for IP {} method {:?}",
+                client_ip, method
+            );
             Ok(())
         }
-        Err(_) => {
-            warn!("Rate limit exceeded for IP {}", client_ip);
+        Err(limit_type) => {
+            warn!(
+                "Rate limit exceeded for IP {} (limit: {})",
+                client_ip, limit_type
+            );
+
+            // Log rate limit event
+            server_config
+                .audit_logger
+                .log_rate_limit(&audit::RateLimitEvent {
+                    request_id: request_id.to_string(),
+                    client_ip,
+                    limit_type,
+                });
+
             let mut response = Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
                 .body(Full::new(bytes::Bytes::from(
@@ -673,6 +683,12 @@ fn check_rate_limit(
                 &server_config.cors_origins,
                 request_origin,
             );
+
+            // Update metrics
+            metrics::RATE_LIMIT_HITS_TOTAL
+                .with_label_values(&[&client_ip.to_string(), method.unwrap_or("unknown")])
+                .inc();
+
             Err(Box::new(response))
         }
     }
@@ -822,7 +838,6 @@ fn add_cors_and_security_headers(
 async fn handle_req(
     req: Request<hyper::body::Incoming>,
     rpc: Arc<VerusRPC>,
-    rate_limiter: Arc<IpRateLimiter>,
     client_ip: IpAddr,
     server_config: Arc<ServerConfig>,
 ) -> Result<Response<Full<bytes::Bytes>>> {
@@ -831,7 +846,8 @@ async fn handle_req(
     let span = tracing::info_span!("request", request_id = %request_id, client_ip = %client_ip);
     let _enter = span.enter();
 
-    info!("Incoming {} request to {}", req.method(), req.uri().path());
+    let path = req.uri().path();
+    info!("Incoming {} request to {}", req.method(), path);
 
     // Extract Origin header for CORS (convert to String to avoid borrow issues)
     let request_origin = req
@@ -840,6 +856,52 @@ async fn handle_req(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // Check IP filter (except for health/metrics endpoints)
+    if path != "/health" && path != "/ready" && path != "/metrics" {
+        if !server_config.ip_filter.is_allowed(client_ip) {
+            let denial_reason = server_config
+                .ip_filter
+                .denial_reason(client_ip)
+                .unwrap_or_else(|| "IP not allowed".to_string());
+            warn!("IP {} denied: {}", client_ip, denial_reason);
+
+            // Log IP denial
+            server_config.audit_logger.log_auth(&audit::AuthEvent {
+                request_id: request_id.clone(),
+                client_ip,
+                success: false,
+                key_name: None,
+                failure_reason: Some(denial_reason.clone()),
+            });
+
+            let mut response = Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Full::new(bytes::Bytes::from(
+                    json!({
+                        "error": {
+                            "code": -32002,
+                            "message": format!("Access denied: {}", denial_reason),
+                            "request_id": request_id
+                        }
+                    })
+                    .to_string(),
+                )))
+                .context("Failed to build IP denial response")?;
+            response.headers_mut().insert(
+                "X-Request-ID",
+                request_id
+                    .parse()
+                    .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+            );
+            add_cors_and_security_headers(
+                &mut response,
+                &server_config.cors_origins,
+                request_origin.as_ref(),
+            );
+            return Ok(response);
+        }
+    }
+
     // Check API key authentication
     if let Err(response) =
         check_authentication(&req, &server_config, &request_id, request_origin.as_ref())
@@ -847,11 +909,11 @@ async fn handle_req(
         return Ok(*response);
     }
 
-    // Check rate limiting
+    // Check rate limiting (will be called again with method name after parsing request)
     if let Err(response) = check_rate_limit(
         &req,
-        &rate_limiter,
         client_ip,
+        None, // No method known yet
         &request_id,
         &server_config,
         request_origin.as_ref(),
@@ -941,6 +1003,44 @@ async fn handle_req(
             request_origin.as_ref(),
         );
         return Ok(response);
+    }
+
+    // Metrics endpoint - Prometheus-compatible metrics
+    if req.uri().path() == "/metrics" {
+        debug!("Metrics request");
+
+        match metrics::gather() {
+            Ok(metrics_text) => {
+                let mut response = Response::new(Full::new(bytes::Bytes::from(metrics_text)));
+                response.headers_mut().insert(
+                    hyper::header::CONTENT_TYPE,
+                    hyper::header::HeaderValue::from_static(
+                        "text/plain; version=0.0.4; charset=utf-8",
+                    ),
+                );
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+                );
+                return Ok(response);
+            }
+            Err(e) => {
+                error!("Failed to gather metrics: {}", e);
+                let mut response = Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Full::new(bytes::Bytes::from("Failed to gather metrics")))
+                    .context("Failed to build metrics error response")?;
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+                );
+                return Ok(response);
+            }
+        }
     }
 
     // Handle CORS preflight (OPTIONS) request
@@ -1119,133 +1219,78 @@ async fn main() -> Result<()> {
     info!("Starting Rust Verusd RPC Server");
 
     // Load configuration from file and environment variables
-    // Environment variables must be prefixed with VERUS_RPC_ and use uppercase
-    // Example: VERUS_RPC_RPC_URL, VERUS_RPC_SERVER_PORT
-    let settings = config::Config::builder()
-        .add_source(config::File::with_name("Conf"))
-        .add_source(config::Environment::with_prefix("VERUS_RPC").separator("_"))
-        .build()
-        .context("Failed to load configuration")?;
+    let cfg = config::ServerConfiguration::load().context("Failed to load configuration")?;
 
-    // Read and validate configuration
-    let url = settings
-        .get_string("rpc_url")
-        .context("Failed to read 'rpc_url' from configuration")?
-        .trim()
-        .to_string();
-    let user = settings
-        .get_string("rpc_user")
-        .context("Failed to read 'rpc_user' from configuration")?
-        .trim()
-        .to_string();
-    let password = settings
-        .get_string("rpc_password")
-        .context("Failed to read 'rpc_password' from configuration")?
-        .trim()
-        .to_string();
-    let port = settings
-        .get_int("server_port")
-        .context("Failed to read 'server_port' from configuration")?;
-    let server_addr_str = settings
-        .get_string("server_addr")
-        .context("Failed to read 'server_addr' from configuration")?
-        .trim()
-        .to_string();
-
-    // Validate RPC URL format
-    if url.is_empty() {
-        return Err(anyhow!("rpc_url cannot be empty"));
-    }
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(anyhow!("rpc_url must start with http:// or https://"));
-    }
-
-    // Validate credentials are not empty
-    if user.is_empty() {
-        return Err(anyhow!("rpc_user cannot be empty"));
-    }
-    if password.is_empty() {
-        return Err(anyhow!("rpc_password cannot be empty"));
-    }
-
-    // Validate port range
-    if !(1..=65535).contains(&port) {
-        return Err(anyhow!("Invalid server_port: must be between 1 and 65535"));
-    }
-
-    // Validate server address is not empty
-    if server_addr_str.is_empty() {
-        return Err(anyhow!("server_addr cannot be empty"));
-    }
-
-    // Parse and validate server address
-    let server_addr = server_addr_str
-        .parse::<IpAddr>()
-        .context("Invalid server_addr: must be a valid IP address")?;
-
-    // Read request timeout from configuration with default
-    let timeout_secs = settings
-        .get_int("request_timeout")
-        .unwrap_or(DEFAULT_REQUEST_TIMEOUT as i64);
-    let timeout = Duration::from_secs(timeout_secs as u64);
-
-    // Read rate limiting configuration
-    let rate_limit_per_minute = settings
-        .get_int("rate_limit_per_minute")
-        .unwrap_or(DEFAULT_RATE_LIMIT_PER_MINUTE as i64) as u32;
-    let rate_limit_burst = settings
-        .get_int("rate_limit_burst")
-        .unwrap_or(DEFAULT_RATE_LIMIT_BURST as i64) as u32;
-
-    // Read API keys configuration
-    let api_keys = settings
-        .get_string("api_keys")
-        .ok()
-        .map(|keys_str| {
-            keys_str
-                .split(',')
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty())
-                .collect::<HashSet<String>>()
-        })
-        .filter(|keys: &HashSet<String>| !keys.is_empty());
-
-    // Read CORS origins configuration
-    let cors_origins = settings
-        .get_string("cors_allowed_origins")
-        .ok()
-        .map(|origins_str| {
-            origins_str
-                .split(',')
-                .map(|o| o.trim().to_string())
-                .filter(|o| !o.is_empty())
-                .collect::<Vec<String>>()
-        })
-        .unwrap_or_else(|| vec!["*".to_string()]);
-
-    // Read methods configuration
-    let methods_config: allowlist_config::MethodsConfig = settings
-        .get::<allowlist_config::MethodsConfig>("methods")
-        .unwrap_or_default();
-
-    info!("Method allowlist preset: {:?}", methods_config.preset);
+    info!("Method allowlist preset: {:?}", cfg.methods.preset);
 
     // Validate security configuration
     info!("Validating security configuration...");
-    validate_security_configuration(&user, &password, &api_keys, &cors_origins, &server_addr_str);
+    validate_security_configuration(
+        &cfg.rpc_user,
+        &cfg.rpc_password,
+        &cfg.api_keys,
+        &cfg.cors_origins,
+        &cfg.server_addr,
+    );
 
-    let server_config = Arc::new(ServerConfig {
-        api_keys: api_keys.clone(),
-        cors_origins: cors_origins.clone(),
-    });
+    // Initialize metrics system
+    if cfg.metrics.enabled {
+        info!("Metrics collection: ENABLED at {}", cfg.metrics.endpoint);
+        metrics::init();
+    } else {
+        info!("Metrics collection: DISABLED");
+    }
 
-    let addr = SocketAddr::from((server_addr, port as u16));
+    // Create IP filter
+    let ip_filter =
+        ip_filter::IpFilter::new(&cfg.ip_access).context("Failed to create IP filter")?;
+    info!("IP access control initialized");
 
-    info!("Connecting to RPC server at {}", url);
-    info!("Request timeout set to {} seconds", timeout_secs);
+    // Create audit logger
+    let audit_logger = audit::AuditLogger::new(cfg.audit.clone());
+    if cfg.audit.enabled {
+        info!("Audit logging: ENABLED");
+    } else {
+        info!("Audit logging: DISABLED");
+    }
+
+    // Create response cache
+    let cache = if cfg.cache.enabled {
+        info!(
+            "Response caching: ENABLED ({} methods, max {} entries)",
+            cfg.cache.methods.len(),
+            cfg.cache.max_entries
+        );
+        Some(cache::ResponseCache::new(&cfg.cache))
+    } else {
+        info!("Response caching: DISABLED");
+        None
+    };
+
+    // Create advanced rate limiter with per-method limits
+    let rate_limiter = rate_limit::AdvancedRateLimiter::new(
+        cfg.rate_limit_per_minute,
+        cfg.rate_limit_burst,
+        cfg.method_rate_limits.clone(),
+    )
+    .context("Failed to create rate limiter")?;
+    info!(
+        "Rate limiting: {} requests/minute with burst of {}",
+        cfg.rate_limit_per_minute, cfg.rate_limit_burst
+    );
+
+    let addr = SocketAddr::from((
+        cfg.server_addr
+            .parse::<IpAddr>()
+            .context("Invalid server address")?,
+        cfg.server_port,
+    ));
+
+    info!("Connecting to RPC server at {}", cfg.rpc_url);
+    info!("Request timeout set to {:?}", cfg.request_timeout);
 
     // Create method allowlist from configuration
-    let allowlist = allowlist::Allowlist::from_config(&methods_config);
+    let allowlist = allowlist::Allowlist::from_config(&cfg.methods);
     info!(
         "Method allowlist initialized with {} allowed methods",
         allowlist.len()
@@ -1253,19 +1298,24 @@ async fn main() -> Result<()> {
 
     // Create and validate RPC client
     let rpc = Arc::new(
-        VerusRPC::new(&url, &user, &password, timeout, allowlist)
-            .context("Failed to create RPC client")?,
+        VerusRPC::new(
+            &cfg.rpc_url,
+            &cfg.rpc_user,
+            &cfg.rpc_password,
+            cfg.request_timeout,
+            allowlist,
+        )
+        .context("Failed to create RPC client")?,
     );
 
-    // Create rate limiter
-    let quota = Quota::per_minute(
-        NonZeroU32::new(rate_limit_per_minute)
-            .context("rate_limit_per_minute must be greater than 0")?,
-    )
-    .allow_burst(
-        NonZeroU32::new(rate_limit_burst).context("rate_limit_burst must be greater than 0")?,
-    );
-    let rate_limiter = Arc::new(RateLimiter::dashmap(quota));
+    let server_config = Arc::new(ServerConfig {
+        api_keys: cfg.api_keys.clone(),
+        cors_origins: cfg.cors_origins.clone(),
+        ip_filter,
+        audit_logger,
+        cache,
+        rate_limiter,
+    });
 
     info!("Server listening on {}", addr);
     info!(
@@ -1273,22 +1323,24 @@ async fn main() -> Result<()> {
         addr
     );
     info!("Readiness check available at http://{}/ready", addr);
-    info!(
-        "Rate limiting: {} requests/minute with burst of {}",
-        rate_limit_per_minute, rate_limit_burst
-    );
+    if cfg.metrics.enabled {
+        info!(
+            "Metrics available at http://{}{}",
+            addr, cfg.metrics.endpoint
+        );
+    }
     info!("TLS termination: Use Caddy or nginx as reverse proxy for HTTPS");
 
-    if api_keys.is_some() {
+    if cfg.api_keys.is_some() {
         info!("API key authentication: ENABLED");
     } else {
         warn!("API key authentication: DISABLED (not recommended for production)");
     }
 
-    if cors_origins.len() == 1 && cors_origins[0] == "*" {
+    if cfg.cors_origins.len() == 1 && cfg.cors_origins[0] == "*" {
         warn!("CORS: Allowing all origins (not recommended for production)");
     } else {
-        info!("CORS: Allowing origins: {:?}", cors_origins);
+        info!("CORS: Allowing origins: {:?}", cfg.cors_origins);
     }
 
     // Create TCP listener
@@ -1339,7 +1391,6 @@ async fn main() -> Result<()> {
             debug!("New connection from {}", remote_addr);
 
             let rpc_clone = Arc::clone(&rpc);
-            let rate_limiter_clone = Arc::clone(&rate_limiter);
             let server_config_clone = Arc::clone(&server_config);
             let client_ip = remote_addr.ip();
 
@@ -1351,11 +1402,8 @@ async fn main() -> Result<()> {
                         io,
                         service_fn(move |req| {
                             let rpc = Arc::clone(&rpc_clone);
-                            let rate_limiter = Arc::clone(&rate_limiter_clone);
                             let server_config = Arc::clone(&server_config_clone);
-                            async move {
-                                handle_req(req, rpc, rate_limiter, client_ip, server_config).await
-                            }
+                            async move { handle_req(req, rpc, client_ip, server_config).await }
                         }),
                     )
                     .await

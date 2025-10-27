@@ -54,4 +54,78 @@ preset = "safe"
 # When preset = "custom", deny specific methods (takes precedence):
 # deny = ["fundrawtransaction"]
 
+# Metrics configuration (optional)
+[metrics]
+# Enable Prometheus metrics collection (default: true)
+enabled = true
+# Metrics endpoint path (default: "/metrics")
+endpoint = "/metrics"
+
+# Per-API-key configuration (optional, advanced)
+# Allows different permission levels and rate limits per key
+# [[api_key]]
+# key = "admin-key-here"
+# name = "Admin Key"
+# methods_preset = "full"
+# rate_limit_per_minute = 1000
+
+# [[api_key]]
+# key = "readonly-key-here"
+# name = "Read Only Key"
+# methods_preset = "minimal"
+# rate_limit_per_minute = 60
+
+# Method-specific rate limiting (optional)
+[method_rate_limits]
+# Default rate limit for all methods (requests per minute)
+default = 60
+# Per-method overrides
+# methods.getblock = 10
+# methods.getrawtransaction = 20
+
+# IP access control (optional)
+[ip_access]
+# IP allowlist (CIDR notation) - if specified, only these IPs are allowed
+# allowlist = ["192.168.1.0/24", "10.0.0.0/8"]
+# IP blocklist (CIDR notation) - always denied, even if in allowlist
+# blocklist = ["1.2.3.4/32"]
+
+# Audit logging configuration (optional)
+[audit]
+# Enable audit logging (default: false)
+enabled = false
+# Log all requests (can be verbose)
+log_requests = true
+# Log response bodies (can be very large, not recommended)
+log_responses = false
+# Log errors (recommended)
+log_errors = true
+# Log authentication attempts
+log_auth = true
+# Log rate limit hits
+log_rate_limits = true
+
+# Response caching configuration (optional)
+[cache]
+# Enable response caching (default: false)
+enabled = false
+# Default TTL in seconds
+ttl_seconds = 10
+# Maximum number of cached entries
+max_entries = 1000
+# Methods to cache (empty = none)
+methods = ["getinfo", "getblockcount"]
+# Per-method TTL overrides
+# method_ttl.getblock = 5
+# method_ttl.getinfo = 30
+
+# Upstream RPC connection configuration (optional)
+[upstream]
+# Maximum concurrent connections (default: 100)
+max_connections = 100
+# Connection timeout in milliseconds (default: 5000)
+connection_timeout_ms = 5000
+# Keep-alive timeout in milliseconds (default: 90000)
+keep_alive_timeout_ms = 90000
+
 # Note: For TLS/HTTPS, use a reverse proxy like Caddy or nginx
