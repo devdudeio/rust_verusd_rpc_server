@@ -1,6 +1,6 @@
 # Rust Verusd RPC Server
 
-A high-performance, secure RPC proxy server for Verus blockchain nodes written in Rust. This server sits between your clients and the Verus daemon, providing enhanced security, rate limiting, caching, and monitoring capabilities.
+A high-performance, secure RPC proxy server for Verus blockchain nodes written in Rust. This server sits between your clients and the Verus daemon, providing enhanced security, rate limiting, and request validation capabilities.
 
 ## Features
 
@@ -15,7 +15,6 @@ A high-performance, secure RPC proxy server for Verus blockchain nodes written i
 ### Performance
 - **Request Timeout**: Configurable timeouts to prevent hanging requests (30s default)
 - **Connection Pooling**: Automatic HTTP connection reuse for upstream RPC
-- **Response Caching**: Cache read-only RPC responses (configurable TTL)
 - **Async I/O**: Built on Tokio for maximum concurrency
 
 ### Operations
@@ -103,10 +102,6 @@ cors_allowed_origins = "https://example.com,https://app.example.com"
 # If both are provided, server will use HTTPS
 tls_cert_path = "/path/to/cert.pem"
 tls_key_path = "/path/to/key.pem"
-
-# Optional: Response caching
-cache_ttl_seconds = 60      # Cache TTL in seconds
-cache_max_capacity = 1000   # Max number of cached items
 ```
 
 ### Environment Variables
@@ -129,8 +124,6 @@ export VERUS_RPC_API_KEYS="key1,key2,key3"
 export VERUS_RPC_CORS_ALLOWED_ORIGINS="https://example.com"
 export VERUS_RPC_TLS_CERT_PATH="/path/to/cert.pem"
 export VERUS_RPC_TLS_KEY_PATH="/path/to/key.pem"
-export VERUS_RPC_CACHE_TTL_SECONDS="60"
-export VERUS_RPC_CACHE_MAX_CAPACITY="1000"
 ```
 
 **Note:** Environment variables override values in `Conf.toml`.
@@ -430,9 +423,9 @@ openssl rsa -in key.pem -check
 
 ### High memory usage
 
-- Reduce `cache_max_capacity` if caching is enabled
 - Check for connection leaks
 - Monitor with: `docker stats` or system tools
+- Adjust rate limiting settings if needed
 
 ## Development
 
@@ -509,15 +502,6 @@ rate_limit_burst = 100
 # Low traffic / restrictive
 rate_limit_per_minute = 10
 rate_limit_burst = 5
-```
-
-### Caching
-
-Enable caching for read-heavy workloads:
-
-```toml
-cache_ttl_seconds = 30      # Short TTL for frequently changing data
-cache_max_capacity = 10000  # Large capacity for high traffic
 ```
 
 ## Contributing
