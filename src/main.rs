@@ -364,34 +364,78 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(addr).await
         .context("Failed to bind to address")?;
 
-    // Accept connections
-    loop {
-        let (stream, remote_addr) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!("Failed to accept connection: {}", e);
-                continue;
-            }
+    // Setup graceful shutdown signal handler
+    let shutdown_signal = async {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C handler");
         };
 
-        debug!("New connection from {}", remote_addr);
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
 
-        let io = TokioIo::new(stream);
-        let rpc_clone = Arc::clone(&rpc);
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
 
-        // Spawn a task to handle the connection
-        tokio::task::spawn(async move {
-            if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(move |req| {
-                    let rpc = Arc::clone(&rpc_clone);
-                    async move {
-                        handle_req(req, rpc).await
-                    }
-                }))
-                .await
-            {
-                error!("Error serving connection from {}: {:?}", remote_addr, err);
-            }
-        });
+        tokio::select! {
+            _ = ctrl_c => {
+                info!("Received Ctrl+C signal");
+            },
+            _ = terminate => {
+                info!("Received SIGTERM signal");
+            },
+        }
+    };
+
+    // Accept connections with graceful shutdown
+    let server = async {
+        loop {
+            let (stream, remote_addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("Failed to accept connection: {}", e);
+                    continue;
+                }
+            };
+
+            debug!("New connection from {}", remote_addr);
+
+            let io = TokioIo::new(stream);
+            let rpc_clone = Arc::clone(&rpc);
+
+            // Spawn a task to handle the connection
+            tokio::task::spawn(async move {
+                if let Err(err) = http1::Builder::new()
+                    .serve_connection(io, service_fn(move |req| {
+                        let rpc = Arc::clone(&rpc_clone);
+                        async move {
+                            handle_req(req, rpc).await
+                        }
+                    }))
+                    .await
+                {
+                    error!("Error serving connection from {}: {:?}", remote_addr, err);
+                }
+            });
+        }
+    };
+
+    // Run server until shutdown signal
+    tokio::select! {
+        _ = server => {
+            info!("Server stopped");
+        }
+        _ = shutdown_signal => {
+            info!("Shutting down gracefully...");
+        }
     }
+
+    info!("Server shutdown complete");
+    Ok(())
 }
