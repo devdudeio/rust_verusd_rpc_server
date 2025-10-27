@@ -8,6 +8,41 @@ use serde::Serialize;
 use std::net::IpAddr;
 use tracing::{info, warn};
 
+/// Maximum length for sanitized strings in audit logs.
+const MAX_AUDIT_STRING_LENGTH: usize = 256;
+
+/// Sanitizes user-controlled input for safe logging.
+///
+/// This function prevents log injection attacks by:
+/// - Removing control characters (newlines, carriage returns, tabs, etc.)
+/// - Limiting string length to prevent log flooding
+/// - Preserving only printable ASCII and common UTF-8 characters
+///
+/// # Arguments
+///
+/// * `input` - The string to sanitize
+///
+/// # Returns
+///
+/// A sanitized string safe for logging
+fn sanitize_for_log(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .filter(|c| {
+            // Keep printable ASCII and common UTF-8, but exclude control characters
+            !c.is_control() || *c == ' '
+        })
+        .take(MAX_AUDIT_STRING_LENGTH)
+        .collect();
+
+    // Add truncation marker if string was truncated
+    if input.len() > MAX_AUDIT_STRING_LENGTH {
+        format!("{}...[truncated]", cleaned)
+    } else {
+        cleaned
+    }
+}
+
 /// Audit logger for security events.
 #[derive(Debug, Clone)]
 pub struct AuditLogger {
@@ -27,12 +62,14 @@ impl AuditLogger {
             return;
         }
 
+        let method = sanitize_for_log(&event.method);
+
         info!(
             target: "audit",
             event_type = "rpc_request",
             request_id = %event.request_id,
             client_ip = %event.client_ip,
-            method = %event.method,
+            method = %method,
             param_count = event.param_count,
             "RPC request"
         );
@@ -45,11 +82,13 @@ impl AuditLogger {
             return;
         }
 
+        let method = sanitize_for_log(&event.method);
+
         info!(
             target: "audit",
             event_type = "rpc_response",
             request_id = %event.request_id,
-            method = %event.method,
+            method = %method,
             success = event.success,
             duration_ms = event.duration_ms,
             response_size = event.response_size,
@@ -74,13 +113,19 @@ impl AuditLogger {
                 "Authentication successful"
             );
         } else {
+            let reason = event
+                .failure_reason
+                .as_ref()
+                .map(|r| sanitize_for_log(r))
+                .unwrap_or_else(|| "unknown".to_string());
+
             warn!(
                 target: "audit",
                 event_type = "authentication",
                 request_id = %event.request_id,
                 client_ip = %event.client_ip,
                 success = false,
-                reason = %event.failure_reason.as_ref().unwrap_or(&"unknown".to_string()),
+                reason = %reason,
                 "Authentication failed"
             );
         }
@@ -92,12 +137,14 @@ impl AuditLogger {
             return;
         }
 
+        let limit_type = sanitize_for_log(&event.limit_type);
+
         warn!(
             target: "audit",
             event_type = "rate_limit",
             request_id = %event.request_id,
             client_ip = %event.client_ip,
-            limit_type = %event.limit_type,
+            limit_type = %limit_type,
             "Rate limit exceeded"
         );
     }
@@ -109,15 +156,19 @@ impl AuditLogger {
             return;
         }
 
+        let error_type = sanitize_for_log(&event.error_type);
+        let method = event.method.as_ref().map(|m| sanitize_for_log(m));
+        let message = sanitize_for_log(&event.message);
+
         warn!(
             target: "audit",
             event_type = "error",
             request_id = %event.request_id,
             client_ip = %event.client_ip,
-            error_type = %event.error_type,
+            error_type = %error_type,
             error_code = ?event.error_code,
-            method = ?event.method,
-            message = %event.message,
+            method = ?method,
+            message = %message,
             "RPC error"
         );
     }
@@ -129,13 +180,16 @@ impl AuditLogger {
             return;
         }
 
+        let method = sanitize_for_log(&event.method);
+        let reason = sanitize_for_log(&event.reason);
+
         warn!(
             target: "audit",
             event_type = "method_rejection",
             request_id = %event.request_id,
             client_ip = %event.client_ip,
-            method = %event.method,
-            reason = %event.reason,
+            method = %method,
+            reason = %reason,
             "Method not allowed"
         );
     }
@@ -206,6 +260,67 @@ pub struct MethodRejectionEvent {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_sanitize_for_log_basic() {
+        assert_eq!(sanitize_for_log("hello"), "hello");
+        assert_eq!(sanitize_for_log("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_newlines() {
+        assert_eq!(sanitize_for_log("hello\nworld"), "helloworld");
+        assert_eq!(sanitize_for_log("hello\r\nworld"), "helloworld");
+        assert_eq!(sanitize_for_log("line1\nline2\nline3"), "line1line2line3");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_control_chars() {
+        assert_eq!(sanitize_for_log("hello\tworld"), "helloworld");
+        assert_eq!(sanitize_for_log("hello\x00world"), "helloworld");
+        assert_eq!(sanitize_for_log("test\x1b[31mRED\x1b[0m"), "test[31mRED[0m");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_preserves_space() {
+        assert_eq!(sanitize_for_log("hello world"), "hello world");
+        assert_eq!(sanitize_for_log("  spaces  "), "  spaces  ");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_truncation() {
+        let long_string = "a".repeat(300);
+        let sanitized = sanitize_for_log(&long_string);
+
+        // Should have marker
+        assert!(sanitized.ends_with("...[truncated]"));
+
+        // Should have exactly MAX_AUDIT_STRING_LENGTH characters before the marker
+        let without_marker = sanitized.strip_suffix("...[truncated]").unwrap();
+        assert_eq!(without_marker.len(), MAX_AUDIT_STRING_LENGTH);
+        assert_eq!(without_marker.matches('a').count(), MAX_AUDIT_STRING_LENGTH);
+    }
+
+    #[test]
+    fn test_sanitize_for_log_log_injection_attempt() {
+        // Simulate log injection attempt
+        let injection = "normal_method\n[2024-01-01] FAKE LOG ENTRY";
+        let sanitized = sanitize_for_log(injection);
+
+        assert!(!sanitized.contains('\n'));
+        assert_eq!(sanitized, "normal_method[2024-01-01] FAKE LOG ENTRY");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_utf8() {
+        assert_eq!(sanitize_for_log("hello 世界"), "hello 世界");
+        assert_eq!(sanitize_for_log("café"), "café");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_empty() {
+        assert_eq!(sanitize_for_log(""), "");
+    }
 
     fn make_test_logger() -> AuditLogger {
         AuditLogger::new(AuditConfig {
