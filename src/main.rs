@@ -46,7 +46,7 @@ impl VerusRPC {
 
         debug!("Processing RPC method: {}", method);
 
-        let params: Vec<Box<RawValue>> = match req_body["params"].as_array() {
+        let params: Result<Vec<Box<RawValue>>, RpcError> = match req_body["params"].as_array() {
             Some(params) => {
                 params.iter().enumerate().map(|(i, v)| {
                     if method == "getblock" && i == 0 {
@@ -55,24 +55,47 @@ impl VerusRPC {
                             // strings to be passed in clientside and the former JS rpc server
                             // wouldn't care. This will be deprecated in the future and shouldn't
                             // be relied upon.
-                            RawValue::from_string(format!("\"{}\"", num)).unwrap()
+                            RawValue::from_string(format!("\"{}\"", num)).map_err(|e| {
+                                error!("Failed to create RawValue for getblock parameter: {}", e);
+                                RpcError {
+                                    code: -32602,
+                                    message: "Invalid parameter format".into(),
+                                    data: None
+                                }
+                            })
                         } else {
-                            RawValue::from_string(v.to_string()).unwrap()
+                            RawValue::from_string(v.to_string()).map_err(|e| {
+                                error!("Failed to create RawValue: {}", e);
+                                RpcError {
+                                    code: -32602,
+                                    message: "Invalid parameter format".into(),
+                                    data: None
+                                }
+                            })
                         }
                     } else {
-                        RawValue::from_string(v.to_string()).unwrap()
+                        RawValue::from_string(v.to_string()).map_err(|e| {
+                            error!("Failed to create RawValue: {}", e);
+                            RpcError {
+                                code: -32602,
+                                message: "Invalid parameter format".into(),
+                                data: None
+                            }
+                        })
                     }
                 }).collect()
             },
             None => {
                 warn!("Missing or invalid params parameter");
-                return Err(RpcError {
+                Err(RpcError {
                     code: -32602,
                     message: "Invalid params parameter".into(),
                     data: None
-                });
+                })
             }
         };
+
+        let params = params?;
 
         if !allowlist::is_method_allowed(method, &params) {
             warn!("Method not allowed or invalid parameters: {}", method);
@@ -115,26 +138,27 @@ impl VerusRPC {
 }
 
 fn add_cors_headers(response: &mut Response<Full<bytes::Bytes>>) {
+    use hyper::header::HeaderValue;
     let headers = response.headers_mut();
     headers.insert(
         hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        "*".parse().unwrap()
+        HeaderValue::from_static("*")
     );
     headers.insert(
         hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
-        "GET, HEAD, PUT, OPTIONS, POST".parse().unwrap()
+        HeaderValue::from_static("GET, HEAD, PUT, OPTIONS, POST")
     );
     headers.insert(
         hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
-        "Content-Type, Authorization, Accept".parse().unwrap()
+        HeaderValue::from_static("Content-Type, Authorization, Accept")
     );
     headers.insert(
         hyper::header::ACCESS_CONTROL_MAX_AGE,
-        "3600".parse().unwrap()
+        HeaderValue::from_static("3600")
     );
     headers.insert(
         hyper::header::REFERRER_POLICY,
-        "origin-when-cross-origin".parse().unwrap()
+        HeaderValue::from_static("origin-when-cross-origin")
     );
 }
 
