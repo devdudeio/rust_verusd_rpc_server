@@ -686,8 +686,10 @@ fn check_rate_limit(
             );
 
             // Update metrics
+            let ip_str = client_ip.to_string();
+            let method_str = method.unwrap_or("unknown").to_string();
             metrics::RATE_LIMIT_HITS_TOTAL
-                .with_label_values(&[&client_ip.to_string(), method.unwrap_or("unknown")])
+                .with_label_values(&[&ip_str, &method_str])
                 .inc();
 
             Err(Box::new(response))
