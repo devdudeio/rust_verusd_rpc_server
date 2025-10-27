@@ -3,7 +3,6 @@
 .vscode/settings.json
 .vscode
 .DS_Store
-Cargo.lock
 *.pem
 *.key
 Conf.toml
