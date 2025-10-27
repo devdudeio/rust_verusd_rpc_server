@@ -1364,6 +1364,7 @@ dependencies = [
  "jsonrpc",
  "once_cell",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

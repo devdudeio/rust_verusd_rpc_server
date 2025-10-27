@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Configurable Method Allowlist**: Complete overhaul of method allowlisting system
+  - Four preset modes: `minimal`, `safe` (default), `full`, and `custom`
+  - Ten method groups for flexible configuration: `readonly`, `blockchain`, `mempool`, `address`, `currency`, `identity`, `verification`, `rawtx`, `utility`, `advanced`
+  - Custom mode with `allow_groups`, `allow_extra`, and `deny` options
+  - Configuration via `[methods]` section in Conf.toml
+  - Automatic logging of allowed method count on startup
 - Comprehensive integration tests with wiremock for testing RPC mocking
 - Security configuration validation on startup
   - Validates RPC credentials for common/default values
@@ -21,7 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Removed tokio-rustls and rustls-pemfile dependencies
   - Simplified server to HTTP-only
   - Added comprehensive Caddy configuration and documentation
+- **Method Allowlist Architecture**: Refactored from hardcoded list to configuration-driven
+  - Created `allowlist_config` module with `MethodsConfig`, `Preset`, and `MethodGroup` types
+  - Refactored `allowlist` module to use configuration-based approach
+  - `VerusRPC` now holds an `Allowlist` instance instead of calling static functions
+  - All existing parameter validation rules maintained
 - Improved documentation with detailed module-level rustdoc comments
+- Updated README with comprehensive method allowlist configuration documentation
 
 ### Fixed
 - None
@@ -29,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Added timing-attack protection for API key comparison
 - Enhanced input validation for all configuration parameters
+- Improved method allowlist flexibility while maintaining strict parameter validation
 
 ## [0.1.0] - 2025-01-XX
 

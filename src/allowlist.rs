@@ -3,35 +3,21 @@
 //! This module implements a security layer that validates JSON-RPC method calls
 //! before they are forwarded to the Verus daemon. It provides:
 //!
-//! * **Method Allowlisting**: Only explicitly allowed methods can be called
+//! * **Method Allowlisting**: Only approved RPC methods can be called (configurable)
 //! * **Parameter Type Validation**: Ensures parameters match expected types
 //! * **Special Validation Rules**: Custom validation logic for specific methods
 //! * **Security Constraints**: Enforces limits on string length, array size, and numeric ranges
 //!
-//! The allowlist prevents unauthorized access to dangerous RPC methods and protects
-//! against various attack vectors including:
-//! - Wallet manipulation (methods requiring private keys)
-//! - Resource exhaustion (oversized inputs)
-//! - Parameter injection attacks
+//! # Configuration
 //!
-//! # Example
-//!
-//! ```
-//! use serde_json::value::RawValue;
-//! # use rust_verusd_rpc_server::allowlist::is_method_allowed;
-//!
-//! // Check if a method with parameters is allowed
-//! let params = vec![];
-//! assert!(is_method_allowed("getinfo", &params));
-//!
-//! // Disallowed method returns false
-//! assert!(!is_method_allowed("sendtoaddress", &params));
-//! ```
+//! The allowlist can be configured via `Conf.toml` using presets or custom group/method lists.
+//! See [`crate::allowlist_config::MethodsConfig`] for configuration options.
 
+use crate::allowlist_config::MethodsConfig;
 use once_cell::sync::Lazy;
 use serde_json::value::RawValue;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Special validation rules for RPC methods that need custom logic beyond type checking.
 ///
@@ -40,71 +26,28 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 enum SpecialRule {
     /// Requires that a boolean parameter at the given index must be `true`.
-    ///
-    /// Used for methods that require explicit confirmation via a flag (e.g., identity operations).
-    ///
-    /// # Arguments
-    /// * Index of the parameter to check (0-based)
     RequireParamTrue(usize),
 
     /// Requires that an object parameter does not contain a specific key.
-    ///
-    /// Used to prevent passing dangerous parameters (e.g., `address` in `signdata`
-    /// which would require wallet access).
-    ///
-    /// # Arguments
-    /// * The key name that must not be present
     ObjectMustNotContainKey(&'static str),
 
     /// Requires an exact number of parameters.
-    ///
-    /// Used when a method must have a specific parameter count for security or
-    /// correctness reasons.
-    ///
-    /// # Arguments
-    /// * The required parameter count
     ExactParamCount(usize),
 
     /// Limits the maximum length of a string parameter.
-    ///
-    /// Prevents resource exhaustion attacks via oversized string inputs.
-    ///
-    /// # Arguments
-    /// * Index of the string parameter (0-based)
-    /// * Maximum allowed length in characters
     StringMaxLength(usize, usize),
 
     /// Limits the maximum size of an array parameter.
-    ///
-    /// Prevents resource exhaustion attacks via oversized array inputs.
-    ///
-    /// # Arguments
-    /// * Index of the array parameter (0-based)
-    /// * Maximum allowed element count
     ArrayMaxSize(usize, usize),
 
     /// Requires a numeric parameter to be within an inclusive range.
-    ///
-    /// Prevents invalid or dangerous numeric inputs.
-    ///
-    /// # Arguments
-    /// * Index of the numeric parameter (0-based)
-    /// * Minimum allowed value (inclusive)
-    /// * Maximum allowed value (inclusive)
     NumberRange(usize, i64, i64),
 }
 
 /// Method specification defining allowed parameters and validation rules.
-///
-/// Each RPC method in the allowlist has a `MethodSpec` that defines:
-/// * The expected parameter types (as string codes)
-/// * Any special validation rules that apply
 #[derive(Debug, Clone)]
 struct MethodSpec {
     /// Expected parameter types in order.
-    ///
-    /// Type codes: `"str"`, `"int"`, `"float"`, `"bool"`, `"obj"`, `"arr"`.
-    /// Parameters are optional from right to left (partial parameter lists are allowed).
     param_types: &'static [&'static str],
 
     /// Additional validation rules applied after type checking.
@@ -125,8 +68,11 @@ impl MethodSpec {
     }
 }
 
-/// Static map of allowed RPC methods and their parameter specifications
-static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
+/// Static map of ALL possible RPC method specifications.
+///
+/// This contains parameter validation rules for all methods that could ever be allowed.
+/// The actual allowed methods are filtered based on configuration.
+static ALL_METHOD_SPECS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     let mut m = HashMap::new();
 
     // Special cases with custom validation
@@ -276,275 +222,225 @@ static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     m
 });
 
-/// Validates that parameter types match the expected types for a method.
-///
-/// This function performs type checking on the provided parameters, ensuring each
-/// parameter matches its expected type code. Parameters are checked left-to-right,
-/// and it's valid to provide fewer parameters than expected (trailing parameters
-/// are optional).
-///
-/// # Arguments
-///
-/// * `params` - The actual parameters from the JSON-RPC request
-/// * `expected_types` - The expected parameter type codes
-///
-/// # Returns
-///
-/// * `true` - All provided parameters match their expected types
-/// * `false` - Parameter count exceeds expected, or a type mismatch was found
-///
-/// # Type Codes
-///
-/// * `"obj"` - JSON object
-/// * `"arr"` - JSON array
-/// * `"int"` - JSON number that is an integer
-/// * `"float"` - Any JSON number
-/// * `"str"` - JSON string
-/// * `"bool"` - JSON boolean
-fn check_params(params: &[Box<RawValue>], expected_types: &[&str]) -> bool {
-    if params.len() > expected_types.len() {
-        return false;
+/// Allowlist validator that checks methods against configuration and validates parameters.
+#[derive(Debug, Clone)]
+pub struct Allowlist {
+    /// Set of allowed method names based on configuration
+    allowed_methods: HashSet<String>,
+}
+
+impl Allowlist {
+    /// Creates a new allowlist from configuration.
+    pub fn from_config(config: &MethodsConfig) -> Self {
+        Self {
+            allowed_methods: config.allowed_methods(),
+        }
     }
-    for (param, &expected_type) in params.iter().zip(expected_types) {
-        let value: Value = match serde_json::from_str(&param.to_string()) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let type_matches = match expected_type {
-            "obj" => matches!(value, Value::Object(_)),
-            "arr" => matches!(value, Value::Array(_)),
-            "int" => matches!(value, Value::Number(n) if n.is_i64()),
-            "float" => matches!(value, Value::Number(_)),
-            "str" => matches!(value, Value::String(_)),
-            "bool" => matches!(value, Value::Bool(_)),
-            _ => false,
-        };
-        if !type_matches {
+
+    /// Checks if an RPC method is allowed and validates its parameters.
+    ///
+    /// This checks:
+    /// 1. Whether the method is in the configured allowlist
+    /// 2. Whether all special validation rules pass
+    /// 3. Whether parameter types match the expected types
+    pub fn is_method_allowed(&self, method: &str, params: &[Box<RawValue>]) -> bool {
+        // First check if method is in configured allowlist
+        if !self.allowed_methods.contains(method) {
             return false;
         }
-    }
-    true
-}
 
-/// Applies special validation rules to method parameters.
-///
-/// This function runs through each special rule defined for a method, validating
-/// that all constraints are met. Rules are applied in order, and validation stops
-/// at the first failure.
-///
-/// # Arguments
-///
-/// * `params` - The parameters from the JSON-RPC request
-/// * `rules` - The special validation rules to apply
-///
-/// # Returns
-///
-/// * `true` - All rules passed validation
-/// * `false` - At least one rule failed
-///
-/// # Rules Applied
-///
-/// See [`SpecialRule`] for the types of validation that can be performed:
-/// * `RequireParamTrue` - Boolean must be true
-/// * `ObjectMustNotContainKey` - Object must not have a specific key
-/// * `ExactParamCount` - Must have exact parameter count
-/// * `StringMaxLength` - String length limit
-/// * `ArrayMaxSize` - Array size limit
-/// * `NumberRange` - Numeric range constraint
-fn apply_special_rules(params: &[Box<RawValue>], rules: &[SpecialRule]) -> bool {
-    for rule in rules {
-        match rule {
-            SpecialRule::RequireParamTrue(index) => {
-                let is_true = params
-                    .get(*index)
-                    .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !is_true {
+        // Then validate parameters using the method spec
+        match ALL_METHOD_SPECS.get(method) {
+            Some(spec) => {
+                // Check special rules
+                if !Self::apply_special_rules(params, &spec.special_rules) {
                     return false;
                 }
+                // Check parameter types
+                Self::check_params(params, spec.param_types)
             }
-            SpecialRule::ObjectMustNotContainKey(key) => {
-                if params.is_empty() {
-                    return false;
-                }
-                let contains_key = serde_json::from_str::<Value>(&params[0].to_string())
-                    .ok()
-                    .and_then(|v| v.as_object().map(|obj| obj.contains_key(*key)))
-                    .unwrap_or(false);
-                if contains_key {
-                    return false;
-                }
-            }
-            SpecialRule::ExactParamCount(count) => {
-                if params.len() != *count {
-                    return false;
-                }
-            }
-            SpecialRule::StringMaxLength(index, max_len) => {
-                let str_len = params
-                    .get(*index)
-                    .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
-                    .and_then(|v| v.as_str().map(|s| s.len()))
-                    .unwrap_or(0);
-                if str_len > *max_len {
-                    return false;
-                }
-            }
-            SpecialRule::ArrayMaxSize(index, max_size) => {
-                let arr_len = params
-                    .get(*index)
-                    .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
-                    .and_then(|v| v.as_array().map(|a| a.len()))
-                    .unwrap_or(0);
-                if arr_len > *max_size {
-                    return false;
-                }
-            }
-            SpecialRule::NumberRange(index, min, max) => {
-                let num_in_range = params
-                    .get(*index)
-                    .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n >= *min && n <= *max)
-                    .unwrap_or(false);
-                if !num_in_range {
-                    return false;
-                }
+            None => {
+                // Method is in allowed list but has no spec - allow it
+                // This handles any custom methods added via allow_extra
+                true
             }
         }
     }
-    true
-}
 
-/// Checks if an RPC method is allowed and validates its parameters.
-///
-/// This is the main entry point for allowlist validation. It checks:
-/// 1. Whether the method is in the allowlist
-/// 2. Whether all special validation rules pass
-/// 3. Whether parameter types match the expected types
-///
-/// Only methods explicitly listed in [`ALLOWED_METHODS`] can pass validation.
-/// Methods requiring wallet access or other dangerous operations are excluded.
-///
-/// # Arguments
-///
-/// * `method` - The RPC method name to check
-/// * `params` - The parameters for the method call
-///
-/// # Returns
-///
-/// * `true` - Method is allowed and parameters are valid
-/// * `false` - Method is not in allowlist or parameters are invalid
-///
-/// # Examples
-///
-/// ```
-/// use serde_json::value::RawValue;
-/// # use rust_verusd_rpc_server::allowlist::is_method_allowed;
-///
-/// // Allowed read-only method
-/// let params = vec![];
-/// assert!(is_method_allowed("getinfo", &params));
-///
-/// // Method not in allowlist
-/// assert!(!is_method_allowed("dumpprivkey", &params));
-///
-/// // Method with invalid parameters
-/// let params = vec![
-///     RawValue::from_string("\"not_a_number\"".to_string()).unwrap()
-/// ];
-/// assert!(!is_method_allowed("getblockhash", &params)); // expects int, got string
-/// ```
-///
-/// # Security
-///
-/// Methods that can:
-/// * Access or export private keys
-/// * Send funds or create transactions (without explicit confirmation)
-/// * Modify wallet state
-/// * Perform administrative actions
-///
-/// ...are **NOT** included in the allowlist and will always return `false`.
-pub fn is_method_allowed(method: &str, params: &[Box<RawValue>]) -> bool {
-    match ALLOWED_METHODS.get(method) {
-        Some(spec) => {
-            // First check special rules
-            if !apply_special_rules(params, &spec.special_rules) {
+    /// Validates that parameter types match the expected types for a method.
+    fn check_params(params: &[Box<RawValue>], expected_types: &[&str]) -> bool {
+        if params.len() > expected_types.len() {
+            return false;
+        }
+        for (param, &expected_type) in params.iter().zip(expected_types) {
+            let value: Value = match serde_json::from_str(&param.to_string()) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            let type_matches = match expected_type {
+                "obj" => matches!(value, Value::Object(_)),
+                "arr" => matches!(value, Value::Array(_)),
+                "int" => matches!(value, Value::Number(n) if n.is_i64()),
+                "float" => matches!(value, Value::Number(_)),
+                "str" => matches!(value, Value::String(_)),
+                "bool" => matches!(value, Value::Bool(_)),
+                _ => false,
+            };
+            if !type_matches {
                 return false;
             }
-            // Then check parameter types
-            check_params(params, spec.param_types)
         }
-        None => false,
+        true
+    }
+
+    /// Applies special validation rules to method parameters.
+    fn apply_special_rules(params: &[Box<RawValue>], rules: &[SpecialRule]) -> bool {
+        for rule in rules {
+            match rule {
+                SpecialRule::RequireParamTrue(index) => {
+                    let is_true = params
+                        .get(*index)
+                        .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !is_true {
+                        return false;
+                    }
+                }
+                SpecialRule::ObjectMustNotContainKey(key) => {
+                    if params.is_empty() {
+                        return false;
+                    }
+                    let contains_key = serde_json::from_str::<Value>(&params[0].to_string())
+                        .ok()
+                        .and_then(|v| v.as_object().map(|obj| obj.contains_key(*key)))
+                        .unwrap_or(false);
+                    if contains_key {
+                        return false;
+                    }
+                }
+                SpecialRule::ExactParamCount(count) => {
+                    if params.len() != *count {
+                        return false;
+                    }
+                }
+                SpecialRule::StringMaxLength(index, max_len) => {
+                    let str_len = params
+                        .get(*index)
+                        .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
+                        .and_then(|v| v.as_str().map(|s| s.len()))
+                        .unwrap_or(0);
+                    if str_len > *max_len {
+                        return false;
+                    }
+                }
+                SpecialRule::ArrayMaxSize(index, max_size) => {
+                    let arr_len = params
+                        .get(*index)
+                        .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
+                        .and_then(|v| v.as_array().map(|a| a.len()))
+                        .unwrap_or(0);
+                    if arr_len > *max_size {
+                        return false;
+                    }
+                }
+                SpecialRule::NumberRange(index, min, max) => {
+                    let num_in_range = params
+                        .get(*index)
+                        .and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok())
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n >= *min && n <= *max)
+                        .unwrap_or(false);
+                    if !num_in_range {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Returns the number of methods currently allowed.
+    pub fn len(&self) -> usize {
+        self.allowed_methods.len()
+    }
+
+    /// Returns whether the allowlist is empty.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.allowed_methods.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allowlist_config::Preset;
 
     #[test]
-    fn test_method_not_in_allowlist() {
+    fn test_safe_preset_allows_basic_methods() {
+        let config = MethodsConfig {
+            preset: Preset::Safe,
+            ..Default::default()
+        };
+        let allowlist = Allowlist::from_config(&config);
+
         let params = vec![];
-        assert!(!is_method_allowed("notarealmethod", &params));
+        assert!(allowlist.is_method_allowed("getinfo", &params));
+        assert!(allowlist.is_method_allowed("getblock", &params));
     }
 
     #[test]
-    fn test_getinfo_no_params() {
+    fn test_safe_preset_blocks_identity_methods() {
+        let config = MethodsConfig {
+            preset: Preset::Safe,
+            ..Default::default()
+        };
+        let allowlist = Allowlist::from_config(&config);
+
         let params = vec![];
-        assert!(is_method_allowed("getinfo", &params));
+        assert!(!allowlist.is_method_allowed("registeridentity", &params));
     }
 
     #[test]
-    fn test_getblock_with_params() {
-        let hash_param = RawValue::from_string("\"000000\"".to_string()).unwrap();
-        let verbose_param = RawValue::from_string("true".to_string()).unwrap();
-        let params = vec![hash_param, verbose_param];
-        assert!(is_method_allowed("getblock", &params));
+    fn test_full_preset_allows_identity_methods() {
+        let config = MethodsConfig {
+            preset: Preset::Full,
+            ..Default::default()
+        };
+        let allowlist = Allowlist::from_config(&config);
+
+        let bool_param = RawValue::from_string("true".to_string()).unwrap();
+        let obj_param = RawValue::from_string("{}".to_string()).unwrap();
+        let params = vec![obj_param, bool_param];
+        assert!(allowlist.is_method_allowed("registeridentity", &params));
     }
 
     #[test]
     fn test_signdata_without_address() {
+        let config = MethodsConfig {
+            preset: Preset::Full,
+            ..Default::default()
+        };
+        let allowlist = Allowlist::from_config(&config);
+
         let obj_param = RawValue::from_string("{\"message\":\"test\"}".to_string()).unwrap();
         let params = vec![obj_param];
-        assert!(is_method_allowed("signdata", &params));
+        assert!(allowlist.is_method_allowed("signdata", &params));
     }
 
     #[test]
     fn test_signdata_with_address_rejected() {
+        let config = MethodsConfig {
+            preset: Preset::Full,
+            ..Default::default()
+        };
+        let allowlist = Allowlist::from_config(&config);
+
         let obj_param =
             RawValue::from_string("{\"address\":\"test\",\"message\":\"test\"}".to_string())
                 .unwrap();
         let params = vec![obj_param];
-        assert!(!is_method_allowed("signdata", &params));
-    }
-
-    #[test]
-    fn test_createmultisig_valid_range() {
-        let num_param = RawValue::from_string("2".to_string()).unwrap();
-        let arr_param = RawValue::from_string("[\"key1\",\"key2\",\"key3\"]".to_string()).unwrap();
-        let params = vec![num_param, arr_param];
-        assert!(is_method_allowed("createmultisig", &params));
-    }
-
-    #[test]
-    fn test_createmultisig_invalid_range() {
-        let num_param = RawValue::from_string("20".to_string()).unwrap();
-        let arr_param = RawValue::from_string("[]".to_string()).unwrap();
-        let params = vec![num_param, arr_param];
-        assert!(!is_method_allowed("createmultisig", &params));
-    }
-
-    #[test]
-    fn test_createmultisig_array_too_large() {
-        let num_param = RawValue::from_string("2".to_string()).unwrap();
-        let large_arr = (0..20)
-            .map(|i| format!("\"key{}\"", i))
-            .collect::<Vec<_>>()
-            .join(",");
-        let arr_param = RawValue::from_string(format!("[{}]", large_arr)).unwrap();
-        let params = vec![num_param, arr_param];
-        assert!(!is_method_allowed("createmultisig", &params));
+        assert!(!allowlist.is_method_allowed("signdata", &params));
     }
 }

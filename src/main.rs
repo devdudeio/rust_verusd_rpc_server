@@ -57,6 +57,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 mod allowlist;
+mod allowlist_config;
 
 /// Maximum allowed request body size in bytes (50 MiB).
 ///
@@ -227,6 +228,9 @@ struct VerusRPC {
 
     /// Timeout duration for RPC requests.
     timeout: Duration,
+
+    /// Method allowlist for validating RPC requests.
+    allowlist: allowlist::Allowlist,
 }
 
 impl VerusRPC {
@@ -238,6 +242,7 @@ impl VerusRPC {
     /// * `user` - RPC username for authentication
     /// * `pass` - RPC password for authentication
     /// * `timeout` - Request timeout duration
+    /// * `allowlist` - Method allowlist for validating RPC requests
     ///
     /// # Returns
     ///
@@ -254,7 +259,8 @@ impl VerusRPC {
     ///     "http://localhost:27486",
     ///     "user",
     ///     "pass",
-    ///     Duration::from_secs(30)
+    ///     Duration::from_secs(30),
+    ///     allowlist
     /// )?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -263,6 +269,7 @@ impl VerusRPC {
         user: &str,
         pass: &str,
         timeout: Duration,
+        allowlist: allowlist::Allowlist,
     ) -> Result<VerusRPC, simple_http::Error> {
         let transport = SimpleHttpTransport::builder()
             .url(url)?
@@ -271,6 +278,7 @@ impl VerusRPC {
         Ok(VerusRPC {
             client: Client::with_transport(transport),
             timeout,
+            allowlist,
         })
     }
 
@@ -372,7 +380,7 @@ impl VerusRPC {
 
         let params = params?;
 
-        if !allowlist::is_method_allowed(method, &params) {
+        if !self.allowlist.is_method_allowed(method, &params) {
             warn!("Method not allowed or invalid parameters: {}", method);
             return Err(RpcError {
                 code: -32601,
@@ -1215,6 +1223,13 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_else(|| vec!["*".to_string()]);
 
+    // Read methods configuration
+    let methods_config: allowlist_config::MethodsConfig = settings
+        .get::<allowlist_config::MethodsConfig>("methods")
+        .unwrap_or_default();
+
+    info!("Method allowlist preset: {:?}", methods_config.preset);
+
     // Validate security configuration
     info!("Validating security configuration...");
     validate_security_configuration(&user, &password, &api_keys, &cors_origins, &server_addr_str);
@@ -1229,9 +1244,17 @@ async fn main() -> Result<()> {
     info!("Connecting to RPC server at {}", url);
     info!("Request timeout set to {} seconds", timeout_secs);
 
+    // Create method allowlist from configuration
+    let allowlist = allowlist::Allowlist::from_config(&methods_config);
+    info!(
+        "Method allowlist initialized with {} allowed methods",
+        allowlist.len()
+    );
+
     // Create and validate RPC client
     let rpc = Arc::new(
-        VerusRPC::new(&url, &user, &password, timeout).context("Failed to create RPC client")?,
+        VerusRPC::new(&url, &user, &password, timeout, allowlist)
+            .context("Failed to create RPC client")?,
     );
 
     // Create rate limiter

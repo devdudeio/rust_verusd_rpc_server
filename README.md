@@ -101,6 +101,27 @@ api_keys = "secret-key-1,secret-key-2,secret-key-3"
 # For production, specify exact origins
 cors_allowed_origins = "https://example.com,https://app.example.com"
 
+# Optional: Method allowlist configuration
+# Controls which RPC methods are allowed to be called
+[methods]
+# Preset mode: "minimal" | "safe" | "full" | "custom" (default: "safe")
+# - minimal: Only basic info methods (getinfo, getblockcount, etc.)
+# - safe: All read-only methods, no spending/wallet operations
+# - full: All methods in the allowlist including identity operations
+# - custom: Define your own using allow_groups, allow_extra, and deny
+preset = "safe"
+
+# When preset = "custom", specify which method groups to allow:
+# Available groups: readonly, blockchain, mempool, address, currency,
+#                   identity, verification, rawtx, utility, advanced
+# allow_groups = ["readonly", "blockchain", "currency"]
+
+# When preset = "custom", add specific methods not in groups:
+# allow_extra = ["sendcurrency"]
+
+# When preset = "custom", deny specific methods (takes precedence):
+# deny = ["fundrawtransaction"]
+
 # Note: For HTTPS, use Caddy or nginx as a reverse proxy
 # See the "HTTPS with Caddy" section below
 ```
@@ -515,32 +536,107 @@ Integrate with monitoring tools like:
 - New Relic
 - AWS CloudWatch
 
-## Allowed RPC Methods
+## Method Allowlist Configuration
 
-The server implements a strict allowlist for security. Only these methods are allowed:
+The server implements a configurable allowlist for security. You can control which RPC methods are allowed using **presets** or **custom groups**.
 
-**Blockchain Info:**
-- `getinfo`, `getblockchaininfo`, `getnetworkinfo`, `getmininginfo`
-- `getblock`, `getblockcount`, `getblockhash`, `getblockheader`, `getbestblockhash`
-- `getchaintips`, `getdifficulty`, `getblocksubsidy`
+### Preset Modes
 
-**Transactions:**
-- `getrawtransaction`, `decoderawtransaction`, `sendrawtransaction`
-- `createrawtransaction`, `decodescript`, `gettxout`, `gettxoutsetinfo`
+Choose a preset that matches your security requirements:
 
-**Addresses:**
-- `getaddressbalance`, `getaddressdeltas`, `getaddressmempool`
-- `getaddresstxids`, `getaddressutxos`, `getspentinfo`
+#### 1. **Minimal** (Most Restrictive)
+Only basic blockchain info methods:
+- `getinfo`, `getblockcount`, `getbestblockhash`, `getdifficulty`
+- `getblockchaininfo`, `getnetworkinfo`, `getmininginfo`
+- `gettxoutsetinfo`, `coinsupply`, `help`
 
-**Identity & Currency:**
-- `getidentity`, `getcurrency`, `getcurrencystate`, `getcurrencyconverters`
-- `getidentitycontent`, `listcurrencies`, `getoffers`
+**Use case:** Public endpoints, minimal exposure
 
-**Utilities:**
-- `help`, `coinsupply`, `estimatefee`, `estimatepriority`
-- `verifymessage`, `verifyhash`, `verifysignature`
+#### 2. **Safe** (Default, Recommended)
+All read-only methods, no spending or wallet operations:
+- All **Minimal** methods
+- Block/transaction queries (getblock, getrawtransaction, etc.)
+- Address queries (getaddressbalance, getaddressutxos, etc.)
+- Currency queries (getcurrency, getcurrencystate, etc.)
+- Mempool operations (getrawmempool, getmempoolinfo, etc.)
+- Signature verification (verifymessage, verifyhash, etc.)
+- Utility methods (estimatefee, createmultisig, etc.)
 
-And more... See `src/allowlist.rs` for the complete list.
+**Use case:** Most deployments, blockchain explorers, read-only APIs
+
+#### 3. **Full** (Least Restrictive)
+All methods including identity and advanced operations:
+- All **Safe** methods
+- Identity operations (getidentity, registeridentity, etc.)
+- Raw transaction creation (createrawtransaction, sendrawtransaction, etc.)
+- Advanced operations (signdata, submitimports, etc.)
+
+**Use case:** Trusted internal services, full functionality required
+
+#### 4. **Custom** (Flexible)
+Define your own allowlist using method groups, individual methods, and deny rules.
+
+### Method Groups
+
+When using `preset = "custom"`, you can combine these method groups:
+
+- **readonly**: Basic info (getinfo, getblockcount, getdifficulty, etc.)
+- **blockchain**: Block/transaction queries (getblock, getrawtransaction, etc.)
+- **mempool**: Mempool operations (getrawmempool, getmempoolinfo, etc.)
+- **address**: Address queries (getaddressbalance, getaddressutxos, etc.)
+- **currency**: Currency operations (getcurrency, getcurrencystate, etc.)
+- **identity**: Identity operations (getidentity, registeridentity, etc.)
+- **verification**: Signature verification (verifymessage, verifyhash, etc.)
+- **rawtx**: Raw transaction operations (createrawtransaction, sendrawtransaction, etc.)
+- **utility**: Utility methods (help, estimatefee, createmultisig, etc.)
+- **advanced**: Advanced operations (signdata, submitimports, etc.)
+
+### Configuration Examples
+
+**Example 1: Use Safe preset (default)**
+```toml
+[methods]
+preset = "safe"
+```
+
+**Example 2: Minimal exposure for public endpoint**
+```toml
+[methods]
+preset = "minimal"
+```
+
+**Example 3: Custom - blockchain queries + currency info only**
+```toml
+[methods]
+preset = "custom"
+allow_groups = ["readonly", "blockchain", "currency"]
+```
+
+**Example 4: Custom - safe methods + one specific advanced method**
+```toml
+[methods]
+preset = "custom"
+allow_groups = ["readonly", "blockchain", "mempool", "address", "currency"]
+allow_extra = ["signdata"]
+```
+
+**Example 5: Custom - full access except specific methods**
+```toml
+[methods]
+preset = "custom"
+allow_groups = ["readonly", "blockchain", "mempool", "address", "currency", "identity", "rawtx", "utility", "advanced"]
+deny = ["fundrawtransaction", "sendcurrency"]
+```
+
+### Method Validation
+
+Beyond allowlisting, the server validates:
+- **Parameter types**: Ensures params match expected types (string, number, array, object, boolean)
+- **Parameter counts**: Enforces exact parameter counts where required
+- **Special rules**: Custom validation for specific methods (e.g., signdata must not include address parameter)
+- **Security constraints**: String length limits, array size limits, numeric ranges
+
+For the complete list of methods and validation rules, see `src/allowlist.rs` and `src/allowlist_config.rs`.
 
 ## Troubleshooting
 
