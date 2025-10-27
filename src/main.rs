@@ -1,4 +1,4 @@
-use hyper::{Request, Response, body::Body, StatusCode};
+use hyper::{Request, Response, StatusCode};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -12,17 +12,16 @@ use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
 use std::num::NonZeroU32;
 use std::collections::HashSet;
-use std::path::Path;
 use std::fs::File;
 use std::io::BufReader;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use rustls_pemfile::{certs, pkcs8_private_keys};
-use tracing::{info, warn, error, debug, Span};
+use tracing::{info, warn, error, debug};
 use anyhow::{Result, Context, anyhow};
 use uuid::Uuid;
-use governor::{Quota, RateLimiter, Jitter};
-use governor::state::{InMemoryState, NotKeyed};
+use governor::{Quota, RateLimiter};
+use governor::state::InMemoryState;
 use governor::clock::DefaultClock;
 use dashmap::DashMap;
 
