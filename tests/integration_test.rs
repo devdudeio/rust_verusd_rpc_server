@@ -1,4 +1,3 @@
-use reqwest;
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -90,7 +89,7 @@ async fn test_wiremock_setup() {
     // Test that we can call the mock server
     let client = reqwest::Client::new();
     let response = client
-        .post(&mock_server.uri())
+        .post(mock_server.uri())
         .json(&json!({
             "method": "getinfo",
             "params": []
@@ -154,7 +153,7 @@ async fn test_allowed_method_structures() {
 
 #[tokio::test]
 async fn test_cors_headers_requirements() {
-    let expected_cors_headers = vec![
+    let expected_cors_headers = [
         "Access-Control-Allow-Origin",
         "Access-Control-Allow-Methods",
         "Access-Control-Allow-Headers",
@@ -162,14 +161,13 @@ async fn test_cors_headers_requirements() {
         "Access-Control-Expose-Headers",
     ];
 
-    for header in expected_cors_headers {
-        assert!(!header.is_empty());
-    }
+    // Verify all required CORS headers are defined
+    assert_eq!(expected_cors_headers.len(), 5);
 }
 
 #[tokio::test]
 async fn test_security_headers_requirements() {
-    let expected_security_headers = vec![
+    let expected_security_headers = [
         "Referrer-Policy",
         "X-Content-Type-Options",
         "X-Frame-Options",
@@ -177,9 +175,8 @@ async fn test_security_headers_requirements() {
         "Content-Type",
     ];
 
-    for header in expected_security_headers {
-        assert!(!header.is_empty());
-    }
+    // Verify all required security headers are defined
+    assert_eq!(expected_security_headers.len(), 5);
 }
 
 #[tokio::test]
@@ -318,7 +315,7 @@ async fn test_mock_rpc_getinfo_response() {
 
     let client = reqwest::Client::new();
     let response = client
-        .post(&mock_server.uri())
+        .post(mock_server.uri())
         .json(&json!({"method": "getinfo", "params": []}))
         .send()
         .await
@@ -349,7 +346,7 @@ async fn test_mock_rpc_error_response() {
 
     let client = reqwest::Client::new();
     let response = client
-        .post(&mock_server.uri())
+        .post(mock_server.uri())
         .json(&json!({"method": "invalidmethod", "params": []}))
         .send()
         .await
@@ -413,18 +410,19 @@ async fn test_request_id_format() {
 #[tokio::test]
 async fn test_http_methods_allowed() {
     // Test which HTTP methods should be allowed
-    let allowed_methods = vec!["POST", "OPTIONS"]; // POST for RPC, OPTIONS for CORS preflight
+    let allowed_methods = ["POST", "OPTIONS"]; // POST for RPC, OPTIONS for CORS preflight
 
-    assert!(allowed_methods.contains(&"POST"));
-    assert!(allowed_methods.contains(&"OPTIONS"));
+    // Verify both required methods are defined
+    assert_eq!(allowed_methods.len(), 2);
 }
 
 #[tokio::test]
 async fn test_content_type_requirements() {
     // Test required content types
-    let valid_content_types = vec!["application/json", "application/json; charset=utf-8"];
+    let valid_content_types = ["application/json", "application/json; charset=utf-8"];
 
+    // Verify all content types include application/json
     for ct in valid_content_types {
-        assert!(ct.contains("application/json"));
+        assert!(ct.starts_with("application/json"));
     }
 }
