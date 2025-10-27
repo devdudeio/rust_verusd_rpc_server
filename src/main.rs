@@ -660,7 +660,11 @@ fn check_rate_limit(
             response
                 .headers_mut()
                 .insert("Retry-After", hyper::header::HeaderValue::from_static("60"));
-            add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+            add_cors_and_security_headers(
+                &mut response,
+                &server_config.cors_origins,
+                request_origin,
+            );
             Err(Box::new(response))
         }
     }
@@ -1241,11 +1245,11 @@ async fn main() -> Result<()> {
     let rate_limiter = Arc::new(RateLimiter::dashmap(quota));
 
     info!("Server listening on {}", addr);
-    info!("Health check (liveness) available at http://{}/health", addr);
     info!(
-        "Readiness check available at http://{}/ready",
+        "Health check (liveness) available at http://{}/health",
         addr
     );
+    info!("Readiness check available at http://{}/ready", addr);
     info!(
         "Rate limiting: {} requests/minute with burst of {}",
         rate_limit_per_minute, rate_limit_burst
