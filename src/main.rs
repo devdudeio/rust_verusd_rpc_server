@@ -460,6 +460,173 @@ impl VerusRPC {
     }
 }
 
+/// Checks API key authentication for a request.
+///
+/// # Arguments
+///
+/// * `req` - The HTTP request
+/// * `server_config` - Server configuration containing API keys
+/// * `request_id` - Unique request ID for tracing
+/// * `request_origin` - Origin header from the request
+///
+/// # Returns
+///
+/// * `Ok(())` - Authentication successful or not required
+/// * `Err(Response)` - Authentication failed, returns error response
+fn check_authentication(
+    req: &Request<hyper::body::Incoming>,
+    server_config: &ServerConfig,
+    request_id: &str,
+    request_origin: Option<&String>,
+) -> Result<(), Box<Response<Full<bytes::Bytes>>>> {
+    // Skip authentication for health and readiness checks
+    if req.uri().path() == "/health" || req.uri().path() == "/ready" {
+        return Ok(());
+    }
+
+    if let Some(ref api_keys) = server_config.api_keys {
+        // Extract API key from headers (X-API-Key or Authorization: Bearer)
+        let provided_key = req
+            .headers()
+            .get("X-API-Key")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| {
+                req.headers()
+                    .get(hyper::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|auth| auth.strip_prefix("Bearer "))
+            });
+
+        match provided_key {
+            Some(key) if api_keys.contains(key) => {
+                debug!("API key authentication successful");
+                Ok(())
+            }
+            Some(_) => {
+                warn!("Invalid API key provided");
+                let mut response = Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .body(Full::new(bytes::Bytes::from(
+                        json!({
+                            "error": {
+                                "code": -32001,
+                                "message": "Invalid API key",
+                                "request_id": request_id
+                            }
+                        })
+                        .to_string(),
+                    )))
+                    .expect("Failed to build authentication error response");
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+                );
+                add_cors_and_security_headers(
+                    &mut response,
+                    &server_config.cors_origins,
+                    request_origin,
+                );
+                Err(Box::new(response))
+            }
+            None => {
+                warn!("Missing API key");
+                let mut response = Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .body(Full::new(bytes::Bytes::from(
+                        json!({
+                            "error": {
+                                "code": -32001,
+                                "message": "API key required. Provide via X-API-Key header or Authorization: Bearer token",
+                                "request_id": request_id
+                            }
+                        })
+                        .to_string(),
+                    )))
+                    .expect("Failed to build authentication error response");
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id
+                        .parse()
+                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+                );
+                add_cors_and_security_headers(
+                    &mut response,
+                    &server_config.cors_origins,
+                    request_origin,
+                );
+                Err(Box::new(response))
+            }
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Checks rate limiting for a client IP address.
+///
+/// # Arguments
+///
+/// * `req` - The HTTP request
+/// * `rate_limiter` - Rate limiter instance
+/// * `client_ip` - Client's IP address
+/// * `request_id` - Unique request ID for tracing
+/// * `server_config` - Server configuration
+/// * `request_origin` - Origin header from the request
+///
+/// # Returns
+///
+/// * `Ok(())` - Rate limit check passed
+/// * `Err(Response)` - Rate limit exceeded, returns error response
+fn check_rate_limit(
+    req: &Request<hyper::body::Incoming>,
+    rate_limiter: &IpRateLimiter,
+    client_ip: IpAddr,
+    request_id: &str,
+    server_config: &ServerConfig,
+    request_origin: Option<&String>,
+) -> Result<(), Box<Response<Full<bytes::Bytes>>>> {
+    // Skip rate limiting for health and readiness checks
+    if req.uri().path() == "/health" || req.uri().path() == "/ready" {
+        return Ok(());
+    }
+
+    match rate_limiter.check_key(&client_ip) {
+        Ok(_) => {
+            debug!("Rate limit check passed for IP {}", client_ip);
+            Ok(())
+        }
+        Err(_) => {
+            warn!("Rate limit exceeded for IP {}", client_ip);
+            let mut response = Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body(Full::new(bytes::Bytes::from(
+                    json!({
+                        "error": {
+                            "code": -32005,
+                            "message": "Rate limit exceeded. Please try again later.",
+                            "request_id": request_id
+                        }
+                    })
+                    .to_string(),
+                )))
+                .expect("Failed to build rate limit response");
+            response.headers_mut().insert(
+                "X-Request-ID",
+                request_id
+                    .parse()
+                    .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+            );
+            response
+                .headers_mut()
+                .insert("Retry-After", hyper::header::HeaderValue::from_static("60"));
+            add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+            Err(Box::new(response))
+        }
+    }
+}
+
 /// Adds CORS and security headers to an HTTP response.
 ///
 /// This function adds appropriate CORS headers based on the configured allowed origins
@@ -622,120 +789,23 @@ async fn handle_req(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Check API key authentication (skip health and readiness checks)
-    if req.uri().path() != "/health" && req.uri().path() != "/ready" {
-        if let Some(ref api_keys) = server_config.api_keys {
-            // Extract API key from headers (X-API-Key or Authorization: Bearer)
-            let provided_key = req
-                .headers()
-                .get("X-API-Key")
-                .and_then(|v| v.to_str().ok())
-                .or_else(|| {
-                    req.headers()
-                        .get(hyper::header::AUTHORIZATION)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|auth| auth.strip_prefix("Bearer "))
-                });
-
-            match provided_key {
-                Some(key) if api_keys.contains(key) => {
-                    debug!("API key authentication successful");
-                }
-                Some(_) => {
-                    warn!("Invalid API key provided");
-                    let mut response = Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Full::new(bytes::Bytes::from(
-                            json!({
-                                "error": {
-                                    "code": -32001,
-                                    "message": "Invalid API key",
-                                    "request_id": &request_id
-                                }
-                            })
-                            .to_string(),
-                        )))
-                        .context("Failed to build authentication error response")?;
-                    response.headers_mut().insert(
-                        "X-Request-ID",
-                        request_id
-                            .parse()
-                            .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
-                    );
-                    add_cors_and_security_headers(
-                        &mut response,
-                        &server_config.cors_origins,
-                        request_origin.as_ref(),
-                    );
-                    return Ok(response);
-                }
-                None => {
-                    warn!("Missing API key");
-                    let mut response = Response::builder()
-                        .status(StatusCode::UNAUTHORIZED)
-                        .body(Full::new(bytes::Bytes::from(json!({
-                            "error": {
-                                "code": -32001,
-                                "message": "API key required. Provide via X-API-Key header or Authorization: Bearer token",
-                                "request_id": &request_id
-                            }
-                        }).to_string())))
-                        .context("Failed to build authentication error response")?;
-                    response.headers_mut().insert(
-                        "X-Request-ID",
-                        request_id
-                            .parse()
-                            .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
-                    );
-                    add_cors_and_security_headers(
-                        &mut response,
-                        &server_config.cors_origins,
-                        request_origin.as_ref(),
-                    );
-                    return Ok(response);
-                }
-            }
-        }
+    // Check API key authentication
+    if let Err(response) =
+        check_authentication(&req, &server_config, &request_id, request_origin.as_ref())
+    {
+        return Ok(*response);
     }
 
-    // Check rate limit for this IP (skip health and readiness checks)
-    if req.uri().path() != "/health" && req.uri().path() != "/ready" {
-        match rate_limiter.check_key(&client_ip) {
-            Ok(_) => {
-                debug!("Rate limit check passed for IP {}", client_ip);
-            }
-            Err(_) => {
-                warn!("Rate limit exceeded for IP {}", client_ip);
-                let mut response = Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .body(Full::new(bytes::Bytes::from(
-                        json!({
-                            "error": {
-                                "code": -32005,
-                                "message": "Rate limit exceeded. Please try again later.",
-                                "request_id": &request_id
-                            }
-                        })
-                        .to_string(),
-                    )))
-                    .context("Failed to build rate limit response")?;
-                response.headers_mut().insert(
-                    "X-Request-ID",
-                    request_id
-                        .parse()
-                        .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
-                );
-                response
-                    .headers_mut()
-                    .insert("Retry-After", hyper::header::HeaderValue::from_static("60"));
-                add_cors_and_security_headers(
-                    &mut response,
-                    &server_config.cors_origins,
-                    request_origin.as_ref(),
-                );
-                return Ok(response);
-            }
-        }
+    // Check rate limiting
+    if let Err(response) = check_rate_limit(
+        &req,
+        &rate_limiter,
+        client_ip,
+        &request_id,
+        &server_config,
+        request_origin.as_ref(),
+    ) {
+        return Ok(*response);
     }
 
     // Health check endpoint - checks if the application is alive
