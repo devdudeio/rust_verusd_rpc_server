@@ -1,41 +1,113 @@
+//! RPC method allowlist and parameter validation.
+//!
+//! This module implements a security layer that validates JSON-RPC method calls
+//! before they are forwarded to the Verus daemon. It provides:
+//!
+//! * **Method Allowlisting**: Only explicitly allowed methods can be called
+//! * **Parameter Type Validation**: Ensures parameters match expected types
+//! * **Special Validation Rules**: Custom validation logic for specific methods
+//! * **Security Constraints**: Enforces limits on string length, array size, and numeric ranges
+//!
+//! The allowlist prevents unauthorized access to dangerous RPC methods and protects
+//! against various attack vectors including:
+//! - Wallet manipulation (methods requiring private keys)
+//! - Resource exhaustion (oversized inputs)
+//! - Parameter injection attacks
+//!
+//! # Example
+//!
+//! ```
+//! use serde_json::value::RawValue;
+//! # use rust_verusd_rpc_server::allowlist::is_method_allowed;
+//!
+//! // Check if a method with parameters is allowed
+//! let params = vec![];
+//! assert!(is_method_allowed("getinfo", &params));
+//!
+//! // Disallowed method returns false
+//! assert!(!is_method_allowed("sendtoaddress", &params));
+//! ```
+
 use once_cell::sync::Lazy;
 use serde_json::value::RawValue;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Type definitions for RPC method parameters
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-enum ParamType {
-    Str,
-    Int,
-    Float,
-    Bool,
-    Obj,
-    Arr,
-}
-
-/// Special validation rules for methods that need custom logic
+/// Special validation rules for RPC methods that need custom logic beyond type checking.
+///
+/// These rules provide additional security constraints and validation for specific
+/// methods that have special requirements.
 #[derive(Debug, Clone)]
 enum SpecialRule {
-    /// Check that parameter at index is true before validating types
+    /// Requires that a boolean parameter at the given index must be `true`.
+    ///
+    /// Used for methods that require explicit confirmation via a flag (e.g., identity operations).
+    ///
+    /// # Arguments
+    /// * Index of the parameter to check (0-based)
     RequireParamTrue(usize),
-    /// Check that object param doesn't contain specific key
+
+    /// Requires that an object parameter does not contain a specific key.
+    ///
+    /// Used to prevent passing dangerous parameters (e.g., `address` in `signdata`
+    /// which would require wallet access).
+    ///
+    /// # Arguments
+    /// * The key name that must not be present
     ObjectMustNotContainKey(&'static str),
-    /// Require exact parameter count
+
+    /// Requires an exact number of parameters.
+    ///
+    /// Used when a method must have a specific parameter count for security or
+    /// correctness reasons.
+    ///
+    /// # Arguments
+    /// * The required parameter count
     ExactParamCount(usize),
-    /// Check string parameter max length
-    StringMaxLength(usize, usize), // (param_index, max_length)
-    /// Check array parameter max size
-    ArrayMaxSize(usize, usize), // (param_index, max_size)
-    /// Check number is in range (inclusive)
-    NumberRange(usize, i64, i64), // (param_index, min, max)
+
+    /// Limits the maximum length of a string parameter.
+    ///
+    /// Prevents resource exhaustion attacks via oversized string inputs.
+    ///
+    /// # Arguments
+    /// * Index of the string parameter (0-based)
+    /// * Maximum allowed length in characters
+    StringMaxLength(usize, usize),
+
+    /// Limits the maximum size of an array parameter.
+    ///
+    /// Prevents resource exhaustion attacks via oversized array inputs.
+    ///
+    /// # Arguments
+    /// * Index of the array parameter (0-based)
+    /// * Maximum allowed element count
+    ArrayMaxSize(usize, usize),
+
+    /// Requires a numeric parameter to be within an inclusive range.
+    ///
+    /// Prevents invalid or dangerous numeric inputs.
+    ///
+    /// # Arguments
+    /// * Index of the numeric parameter (0-based)
+    /// * Minimum allowed value (inclusive)
+    /// * Maximum allowed value (inclusive)
+    NumberRange(usize, i64, i64),
 }
 
-/// Method specification defining allowed parameters and validation rules
+/// Method specification defining allowed parameters and validation rules.
+///
+/// Each RPC method in the allowlist has a `MethodSpec` that defines:
+/// * The expected parameter types (as string codes)
+/// * Any special validation rules that apply
 #[derive(Debug, Clone)]
 struct MethodSpec {
+    /// Expected parameter types in order.
+    ///
+    /// Type codes: `"str"`, `"int"`, `"float"`, `"bool"`, `"obj"`, `"arr"`.
+    /// Parameters are optional from right to left (partial parameter lists are allowed).
     param_types: &'static [&'static str],
+
+    /// Additional validation rules applied after type checking.
     special_rules: Vec<SpecialRule>,
 }
 
@@ -204,7 +276,31 @@ static ALLOWED_METHODS: Lazy<HashMap<&'static str, MethodSpec>> = Lazy::new(|| {
     m
 });
 
-/// Check if parameter types match expected types
+/// Validates that parameter types match the expected types for a method.
+///
+/// This function performs type checking on the provided parameters, ensuring each
+/// parameter matches its expected type code. Parameters are checked left-to-right,
+/// and it's valid to provide fewer parameters than expected (trailing parameters
+/// are optional).
+///
+/// # Arguments
+///
+/// * `params` - The actual parameters from the JSON-RPC request
+/// * `expected_types` - The expected parameter type codes
+///
+/// # Returns
+///
+/// * `true` - All provided parameters match their expected types
+/// * `false` - Parameter count exceeds expected, or a type mismatch was found
+///
+/// # Type Codes
+///
+/// * `"obj"` - JSON object
+/// * `"arr"` - JSON array
+/// * `"int"` - JSON number that is an integer
+/// * `"float"` - Any JSON number
+/// * `"str"` - JSON string
+/// * `"bool"` - JSON boolean
 fn check_params(params: &[Box<RawValue>], expected_types: &[&str]) -> bool {
     if params.len() > expected_types.len() {
         return false;
@@ -230,7 +326,31 @@ fn check_params(params: &[Box<RawValue>], expected_types: &[&str]) -> bool {
     true
 }
 
-/// Apply special validation rules for a method
+/// Applies special validation rules to method parameters.
+///
+/// This function runs through each special rule defined for a method, validating
+/// that all constraints are met. Rules are applied in order, and validation stops
+/// at the first failure.
+///
+/// # Arguments
+///
+/// * `params` - The parameters from the JSON-RPC request
+/// * `rules` - The special validation rules to apply
+///
+/// # Returns
+///
+/// * `true` - All rules passed validation
+/// * `false` - At least one rule failed
+///
+/// # Rules Applied
+///
+/// See [`SpecialRule`] for the types of validation that can be performed:
+/// * `RequireParamTrue` - Boolean must be true
+/// * `ObjectMustNotContainKey` - Object must not have a specific key
+/// * `ExactParamCount` - Must have exact parameter count
+/// * `StringMaxLength` - String length limit
+/// * `ArrayMaxSize` - Array size limit
+/// * `NumberRange` - Numeric range constraint
 fn apply_special_rules(params: &[Box<RawValue>], rules: &[SpecialRule]) -> bool {
     for rule in rules {
         match rule {
@@ -297,7 +417,55 @@ fn apply_special_rules(params: &[Box<RawValue>], rules: &[SpecialRule]) -> bool 
     true
 }
 
-/// Check if a method is allowed and if its parameters are valid
+/// Checks if an RPC method is allowed and validates its parameters.
+///
+/// This is the main entry point for allowlist validation. It checks:
+/// 1. Whether the method is in the allowlist
+/// 2. Whether all special validation rules pass
+/// 3. Whether parameter types match the expected types
+///
+/// Only methods explicitly listed in [`ALLOWED_METHODS`] can pass validation.
+/// Methods requiring wallet access or other dangerous operations are excluded.
+///
+/// # Arguments
+///
+/// * `method` - The RPC method name to check
+/// * `params` - The parameters for the method call
+///
+/// # Returns
+///
+/// * `true` - Method is allowed and parameters are valid
+/// * `false` - Method is not in allowlist or parameters are invalid
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::value::RawValue;
+/// # use rust_verusd_rpc_server::allowlist::is_method_allowed;
+///
+/// // Allowed read-only method
+/// let params = vec![];
+/// assert!(is_method_allowed("getinfo", &params));
+///
+/// // Method not in allowlist
+/// assert!(!is_method_allowed("dumpprivkey", &params));
+///
+/// // Method with invalid parameters
+/// let params = vec![
+///     RawValue::from_string("\"not_a_number\"".to_string()).unwrap()
+/// ];
+/// assert!(!is_method_allowed("getblockhash", &params)); // expects int, got string
+/// ```
+///
+/// # Security
+///
+/// Methods that can:
+/// * Access or export private keys
+/// * Send funds or create transactions (without explicit confirmation)
+/// * Modify wallet state
+/// * Perform administrative actions
+///
+/// ...are **NOT** included in the allowlist and will always return `false`.
 pub fn is_method_allowed(method: &str, params: &[Box<RawValue>]) -> bool {
     match ALLOWED_METHODS.get(method) {
         Some(spec) => {

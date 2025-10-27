@@ -1,3 +1,39 @@
+//! Rust Verusd RPC Server
+//!
+//! A high-performance, secure JSON-RPC proxy server for Verus blockchain nodes.
+//! This server sits between clients and the Verus daemon, providing enhanced
+//! security features including:
+//!
+//! - **API Key Authentication**: Protect RPC endpoints with configurable API keys
+//! - **Per-IP Rate Limiting**: Prevent abuse with token bucket rate limiting
+//! - **TLS/HTTPS Support**: Encrypt traffic with SSL/TLS certificates
+//! - **Method Allowlisting**: Only approved RPC methods are forwarded
+//! - **Input Validation**: Strict parameter validation to prevent injection attacks
+//! - **CORS Configuration**: Control which origins can access the API
+//! - **Request Tracing**: Every request gets a unique ID for correlation
+//! - **Health Checks**: `/health` endpoint for monitoring and load balancers
+//! - **Graceful Shutdown**: Proper SIGTERM/SIGINT handling with connection draining
+//!
+//! # Configuration
+//!
+//! The server can be configured via `Conf.toml` or environment variables with the
+//! `VERUS_RPC_` prefix. Environment variables override file-based configuration.
+//!
+//! # Example
+//!
+//! ```bash
+//! # Start with file configuration
+//! cargo run
+//!
+//! # Start with environment variables
+//! VERUS_RPC_RPC_URL=http://localhost:27486 \
+//! VERUS_RPC_RPC_USER=user \
+//! VERUS_RPC_RPC_PASSWORD=pass \
+//! VERUS_RPC_SERVER_PORT=8080 \
+//! VERUS_RPC_SERVER_ADDR=0.0.0.0 \
+//! cargo run
+//! ```
+
 use anyhow::{anyhow, Context, Result};
 use dashmap::DashMap;
 use governor::clock::DefaultClock;
@@ -27,26 +63,91 @@ use uuid::Uuid;
 
 mod allowlist;
 
-// Configuration constants
-const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 50; // 50 MiB
-const DEFAULT_REQUEST_TIMEOUT: u64 = 30; // seconds
+/// Maximum allowed request body size in bytes (50 MiB).
+///
+/// Requests larger than this will be rejected with a 413 Payload Too Large error.
+const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 50;
+
+/// Default timeout for RPC requests in seconds.
+///
+/// Can be overridden via the `request_timeout` configuration option.
+const DEFAULT_REQUEST_TIMEOUT: u64 = 30;
+
+/// Default maximum requests per IP address per minute.
+///
+/// Can be overridden via the `rate_limit_per_minute` configuration option.
 const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 60;
+
+/// Default burst capacity for rate limiting.
+///
+/// Allows brief spikes above the rate limit. Can be overridden via the
+/// `rate_limit_burst` configuration option.
 const DEFAULT_RATE_LIMIT_BURST: u32 = 10;
 
-// Per-IP rate limiter
+/// Per-IP rate limiter using the token bucket algorithm.
+///
+/// Uses `DashMap` for concurrent access across multiple async tasks, with the
+/// governor crate providing the rate limiting logic.
 type IpRateLimiter = RateLimiter<IpAddr, DashMap<IpAddr, InMemoryState>, DefaultClock>;
 
+/// Server configuration settings.
+///
+/// Contains security and CORS settings that are shared across all request handlers.
 struct ServerConfig {
+    /// Optional set of valid API keys for authentication.
+    ///
+    /// If `None`, API key authentication is disabled (not recommended for production).
+    /// If `Some`, requests must include a valid key via the `X-API-Key` header or
+    /// `Authorization: Bearer` token.
     api_keys: Option<HashSet<String>>,
+
+    /// List of allowed CORS origins.
+    ///
+    /// Can contain exact origins like `"https://example.com"` or `"*"` to allow all.
+    /// For security, wildcard should only be used in development.
     cors_origins: Vec<String>,
 }
 
+/// JSON-RPC client wrapper for communicating with the Verus daemon.
+///
+/// Handles request forwarding, allowlist validation, and timeout management.
 struct VerusRPC {
+    /// Underlying JSON-RPC client for HTTP transport.
     client: Client,
+
+    /// Timeout duration for RPC requests.
     timeout: Duration,
 }
 
 impl VerusRPC {
+    /// Creates a new RPC client connected to the Verus daemon.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The RPC endpoint URL (e.g., `http://localhost:27486`)
+    /// * `user` - RPC username for authentication
+    /// * `pass` - RPC password for authentication
+    /// * `timeout` - Request timeout duration
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(VerusRPC)` - Successfully created RPC client
+    /// * `Err` - If the URL is invalid or transport setup fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// # use rust_verusd_rpc_server::VerusRPC;
+    ///
+    /// let rpc = VerusRPC::new(
+    ///     "http://localhost:27486",
+    ///     "user",
+    ///     "pass",
+    ///     Duration::from_secs(30)
+    /// )?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     fn new(
         url: &str,
         user: &str,
@@ -63,6 +164,31 @@ impl VerusRPC {
         })
     }
 
+    /// Handles a JSON-RPC request with allowlist validation and parameter checking.
+    ///
+    /// This method performs several security checks:
+    /// 1. Validates the method name exists in the request
+    /// 2. Parses and validates parameters
+    /// 3. Checks method and parameters against the allowlist
+    /// 4. Forwards the request to the Verus daemon with timeout
+    ///
+    /// # Arguments
+    ///
+    /// * `req_body` - The JSON-RPC request body
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Value)` - The RPC response result
+    /// * `Err(RpcError)` - If validation fails or the RPC call errors
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// * The method parameter is missing or invalid (-32602)
+    /// * The params parameter is missing or invalid (-32602)
+    /// * The method is not in the allowlist (-32601)
+    /// * The RPC request times out (-32603)
+    /// * The upstream RPC call fails (varies)
     async fn handle(&self, req_body: Value) -> Result<Value, RpcError> {
         let method = match req_body["method"].as_str() {
             Some(method) => method,
@@ -201,7 +327,15 @@ impl VerusRPC {
         Ok(result)
     }
 
-    /// Health check that verifies RPC connectivity
+    /// Performs a health check by calling the `getinfo` RPC method.
+    ///
+    /// This is used by the `/health` endpoint to verify the upstream RPC
+    /// connection is working correctly.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - RPC is healthy and responding
+    /// * `Err(String)` - RPC is unhealthy with error description
     async fn health_check(&self) -> Result<(), String> {
         let check_request = json!({
             "method": "getinfo",
@@ -216,7 +350,33 @@ impl VerusRPC {
     }
 }
 
-/// Load TLS configuration from certificate and key files
+/// Loads TLS configuration from PEM-encoded certificate and key files.
+///
+/// # Arguments
+///
+/// * `cert_path` - Path to the PEM certificate file
+/// * `key_path` - Path to the PEM private key file (PKCS8 format)
+///
+/// # Returns
+///
+/// * `Ok(ServerConfig)` - TLS configuration ready for use
+/// * `Err` - If files cannot be read, parsed, or are empty
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The certificate or key file cannot be opened
+/// * The files are not valid PEM format
+/// * The files are empty (no certificates or keys found)
+/// * The TLS configuration cannot be built
+///
+/// # Examples
+///
+/// ```no_run
+/// # use rust_verusd_rpc_server::load_tls_config;
+/// let tls_config = load_tls_config("cert.pem", "key.pem")?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 fn load_tls_config(cert_path: &str, key_path: &str) -> Result<tokio_rustls::rustls::ServerConfig> {
     // Load certificate chain
     let cert_file = File::open(cert_path)
@@ -256,6 +416,36 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> Result<tokio_rustls::rust
     Ok(config)
 }
 
+/// Adds CORS and security headers to an HTTP response.
+///
+/// This function adds appropriate CORS headers based on the configured allowed origins
+/// and the request's Origin header. It also adds security headers to protect against
+/// common web vulnerabilities.
+///
+/// # Security Headers Added
+///
+/// * `Access-Control-Allow-Origin` - CORS origin (if allowed)
+/// * `Access-Control-Allow-Methods` - Allowed HTTP methods
+/// * `Access-Control-Allow-Headers` - Allowed request headers
+/// * `Access-Control-Max-Age` - Preflight cache duration (3600s)
+/// * `Access-Control-Expose-Headers` - Headers exposed to client
+/// * `Referrer-Policy` - Controls referrer information
+/// * `X-Content-Type-Options` - Prevents MIME sniffing
+/// * `X-Frame-Options` - Prevents clickjacking
+/// * `X-XSS-Protection` - Legacy XSS protection
+/// * `Content-Type` - application/json
+///
+/// # Arguments
+///
+/// * `response` - The HTTP response to modify
+/// * `cors_origins` - List of allowed CORS origins
+/// * `request_origin` - The Origin header from the request, if present
+///
+/// # Behavior
+///
+/// * If `cors_origins` contains `"*"`, all origins are allowed
+/// * If `request_origin` matches an entry in `cors_origins`, that origin is allowed
+/// * If no match, CORS headers are not set (request will fail in browser)
 fn add_cors_and_security_headers(
     response: &mut Response<Full<bytes::Bytes>>,
     cors_origins: &[String],
@@ -331,6 +521,42 @@ fn add_cors_and_security_headers(
     );
 }
 
+/// Handles an incoming HTTP request with full security and validation pipeline.
+///
+/// This is the main request handler that processes all incoming requests. It performs:
+/// 1. Request ID generation for tracing
+/// 2. API key authentication (if enabled)
+/// 3. Per-IP rate limiting (if not a health check)
+/// 4. Special handling for health checks and CORS preflight
+/// 5. Content-Type validation for POST requests
+/// 6. Payload size validation
+/// 7. JSON-RPC request proxying with allowlist enforcement
+///
+/// # Arguments
+///
+/// * `req` - The incoming HTTP request
+/// * `rpc` - Shared RPC client for forwarding requests
+/// * `rate_limiter` - Shared rate limiter for IP-based throttling
+/// * `client_ip` - The client's IP address
+/// * `server_config` - Shared server configuration (API keys, CORS)
+///
+/// # Returns
+///
+/// * `Ok(Response)` - HTTP response (may contain success or error)
+/// * `Err` - Only for catastrophic failures (connection errors, etc.)
+///
+/// # Special Endpoints
+///
+/// * `GET /health` - Returns server health status (bypasses auth and rate limiting)
+/// * `OPTIONS *` - CORS preflight response (bypasses auth and rate limiting)
+///
+/// # Error Responses
+///
+/// The function returns HTTP error responses for:
+/// * 401 Unauthorized - Missing or invalid API key
+/// * 413 Payload Too Large - Request body exceeds [`MAX_CONTENT_LENGTH`]
+/// * 415 Unsupported Media Type - Invalid or missing Content-Type
+/// * 429 Too Many Requests - Rate limit exceeded
 async fn handle_req(
     req: Request<hyper::body::Incoming>,
     rpc: Arc<VerusRPC>,
