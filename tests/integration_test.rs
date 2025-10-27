@@ -185,9 +185,9 @@ async fn test_rate_limiting_configuration() {
     const DEFAULT_RATE_LIMIT: u32 = 60;
     const DEFAULT_BURST: u32 = 10;
 
-    assert!(DEFAULT_RATE_LIMIT > 0);
-    assert!(DEFAULT_BURST > 0);
-    assert!(DEFAULT_BURST <= DEFAULT_RATE_LIMIT);
+    // Verify expected default values
+    assert_eq!(DEFAULT_RATE_LIMIT, 60);
+    assert_eq!(DEFAULT_BURST, 10);
 }
 
 #[tokio::test]
