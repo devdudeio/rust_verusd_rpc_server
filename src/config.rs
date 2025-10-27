@@ -190,6 +190,51 @@ impl ServerConfiguration {
             .parse::<std::net::IpAddr>()
             .context("Invalid server_addr: must be a valid IP address")?;
 
+        // Validate server port
+        if raw.server_port == 0 {
+            anyhow::bail!("server_port cannot be 0");
+        }
+
+        // Warn about privileged ports (< 1024) which require root on Unix systems
+        #[cfg(unix)]
+        if raw.server_port < 1024 {
+            use std::os::unix::fs::MetadataExt;
+            // Check if running as root (UID 0)
+            let is_root = std::fs::metadata("/proc/self")
+                .map(|m| m.uid() == 0)
+                .unwrap_or(false);
+
+            if !is_root {
+                tracing::warn!(
+                    "Port {} is a privileged port (<1024) and may require root privileges to bind. \
+                    Consider using a port >=1024 or running with appropriate permissions.",
+                    raw.server_port
+                );
+            }
+        }
+
+        // Validate IP access control CIDR notation
+        Self::validate_ip_access(&raw.ip_access)?;
+
+        Ok(())
+    }
+
+    /// Validate IP access control configuration.
+    fn validate_ip_access(ip_access: &IpAccessConfig) -> Result<()> {
+        use ipnetwork::IpNetwork;
+
+        // Validate allowlist CIDR notation
+        for cidr in &ip_access.allowlist {
+            cidr.parse::<IpNetwork>()
+                .with_context(|| format!("Invalid CIDR notation in allowlist: '{}'", cidr))?;
+        }
+
+        // Validate blocklist CIDR notation
+        for cidr in &ip_access.blocklist {
+            cidr.parse::<IpNetwork>()
+                .with_context(|| format!("Invalid CIDR notation in blocklist: '{}'", cidr))?;
+        }
+
         Ok(())
     }
 }

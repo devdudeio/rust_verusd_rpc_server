@@ -1,8 +1,22 @@
+# Build artifacts
 /target
+
+# IDE
 .vscode/launch.json
 .vscode/settings.json
 .vscode
 .DS_Store
+
+# Certificates and keys
 *.pem
 *.key
+
+# Configuration files with secrets
 Conf.toml
+.env
+docker-compose.yml
+
+# Keep example files (these should be committed)
+!Conf.toml.example
+!.env.example
+!docker-compose.yml.example
