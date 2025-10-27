@@ -9,6 +9,7 @@ use crate::config_types::ApiKeyConfig;
 use std::collections::HashMap;
 
 /// API key with associated permissions and limits.
+#[allow(dead_code)] // Infrastructure for per-key authorization
 #[derive(Debug, Clone)]
 pub struct ApiKey {
     /// The key value (for constant-time comparison).
@@ -22,6 +23,7 @@ pub struct ApiKey {
 }
 
 /// Authentication manager with per-key permissions.
+#[allow(dead_code)] // Infrastructure for per-key authorization
 #[derive(Debug, Clone)]
 pub struct AuthManager {
     /// Map of API key -> ApiKey struct.
@@ -30,6 +32,7 @@ pub struct AuthManager {
     enabled: bool,
 }
 
+#[allow(dead_code)]
 impl AuthManager {
     /// Create a new authentication manager from API key configurations.
     pub fn new(key_configs: Vec<ApiKeyConfig>, default_methods: &MethodsConfig) -> Self {
@@ -126,6 +129,7 @@ impl AuthManager {
     }
 
     /// Get the number of configured API keys.
+    #[allow(dead_code)] // Utility method for future monitoring
     pub fn key_count(&self) -> usize {
         self.keys.len()
     }

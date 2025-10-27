@@ -29,6 +29,7 @@ impl Default for MetricsConfig {
 }
 
 /// API key configuration with per-key method allowlists.
+#[allow(dead_code)] // Infrastructure ready for future integration
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiKeyConfig {
     /// The API key value.
@@ -63,6 +64,7 @@ pub struct ApiKeyConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MethodRateLimitConfig {
     /// Default rate limit for all methods (requests per minute).
+    #[allow(dead_code)] // Used in infrastructure, will be used for displaying limits
     #[serde(default = "default_rate_limit")]
     pub default: u32,
 

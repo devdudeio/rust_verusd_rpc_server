@@ -77,6 +77,7 @@ impl IpFilter {
     }
 
     /// Check if filter has any restrictions (either allowlist or blocklist).
+    #[allow(dead_code)] // Useful utility method for future use
     pub fn has_restrictions(&self) -> bool {
         !self.allowlist.is_empty() || !self.blocklist.is_empty()
     }

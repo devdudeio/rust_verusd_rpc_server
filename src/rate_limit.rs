@@ -15,6 +15,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 
 /// Composite key for rate limiting (IP + method or IP + API key).
+#[allow(dead_code)] // Infrastructure for future per-API-key rate limiting
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 enum RateLimitKey {
     /// Global per-IP limit.
@@ -35,6 +36,7 @@ pub struct AdvancedRateLimiter {
     /// Method-specific rate limits configuration.
     method_limits: MethodRateLimitConfig,
     /// Global burst capacity.
+    #[allow(dead_code)] // Stored for potential future use in introspection
     global_burst: u32,
 }
 
@@ -118,6 +120,7 @@ impl AdvancedRateLimiter {
     }
 
     /// Get the configured limit for a method (for informational purposes).
+    #[allow(dead_code)] // Useful utility method for future use
     pub fn get_method_limit(&self, method: &str) -> u32 {
         self.method_limits
             .methods
