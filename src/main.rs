@@ -138,9 +138,11 @@ impl VerusRPC {
     }
 }
 
-fn add_cors_headers(response: &mut Response<Full<bytes::Bytes>>) {
+fn add_cors_and_security_headers(response: &mut Response<Full<bytes::Bytes>>) {
     use hyper::header::HeaderValue;
     let headers = response.headers_mut();
+
+    // CORS headers
     headers.insert(
         hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
         HeaderValue::from_static("*")
@@ -151,15 +153,37 @@ fn add_cors_headers(response: &mut Response<Full<bytes::Bytes>>) {
     );
     headers.insert(
         hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Content-Type, Authorization, Accept")
+        HeaderValue::from_static("Content-Type, Authorization, Accept, X-Request-ID")
     );
     headers.insert(
         hyper::header::ACCESS_CONTROL_MAX_AGE,
         HeaderValue::from_static("3600")
     );
     headers.insert(
+        hyper::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("X-Request-ID")
+    );
+
+    // Security headers
+    headers.insert(
         hyper::header::REFERRER_POLICY,
         HeaderValue::from_static("origin-when-cross-origin")
+    );
+    headers.insert(
+        hyper::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff")
+    );
+    headers.insert(
+        hyper::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY")
+    );
+    headers.insert(
+        "X-XSS-Protection",
+        HeaderValue::from_static("1; mode=block")
+    );
+    headers.insert(
+        hyper::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json")
     );
 }
 
@@ -182,7 +206,7 @@ async fn handle_req(
             "X-Request-ID",
             request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
         );
-        add_cors_headers(&mut response);
+        add_cors_and_security_headers(&mut response);
         return Ok(response);
     }
 
@@ -194,7 +218,7 @@ async fn handle_req(
             "X-Request-ID",
             request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
         );
-        add_cors_headers(&mut response);
+        add_cors_and_security_headers(&mut response);
         return Ok(response);
     }
 
@@ -218,7 +242,7 @@ async fn handle_req(
                     "X-Request-ID",
                     request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
                 );
-                add_cors_headers(&mut response);
+                add_cors_and_security_headers(&mut response);
                 return Ok(response);
             }
             None => {
@@ -231,7 +255,7 @@ async fn handle_req(
                     "X-Request-ID",
                     request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
                 );
-                add_cors_headers(&mut response);
+                add_cors_and_security_headers(&mut response);
                 return Ok(response);
             }
         }
@@ -251,7 +275,7 @@ async fn handle_req(
                         "X-Request-ID",
                         request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
                     );
-                    add_cors_headers(&mut response);
+                    add_cors_and_security_headers(&mut response);
                     return Ok(response);
                 }
             }
