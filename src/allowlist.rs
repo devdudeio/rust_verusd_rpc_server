@@ -1,4 +1,4 @@
-use serde_json::{Value};
+use serde_json::Value;
 use serde_json::value::RawValue;
 
 fn check_params(params: &[Box<RawValue>], expected_types: &[&str]) -> bool {
@@ -6,7 +6,10 @@ fn check_params(params: &[Box<RawValue>], expected_types: &[&str]) -> bool {
         return false;
     }
     for (param, &expected_type) in params.iter().zip(expected_types) {
-        let value: Value = serde_json::from_str(&param.to_string()).unwrap();
+        let value: Value = match serde_json::from_str(&param.to_string()) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         match expected_type {
             "obj" => if !matches!(value, Value::Object(_)) { return false; },
             "arr" => if !matches!(value, Value::Array(_)) { return false; },
@@ -34,12 +37,26 @@ pub fn is_method_allowed(method: &str, params: &[Box<RawValue>]) -> bool {
                 _ => false,
             }
         },
-        "recoveridentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["obj", "bool", "bool", "float", "str"]),
-        "registeridentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["obj", "bool", "float", "str"]),
-        "revokeidentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["str", "bool", "bool", "float", "str"]),
-        "updateidentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["obj", "bool", "bool", "float", "str"]),
-        "setidentitytimelock" => params.get(2).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["str", "obj", "bool", "float", "str"]),
-        "sendcurrency" => params.get(4).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).map_or(false, |v| v.as_bool().unwrap_or(false)) && check_params(params, &["str", "arr", "int", "float", "bool"]),
+        "signdata" => {
+            if params.len() != 1 {
+                return false;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(&params[0].to_string()) {
+                if let Value::Object(obj) = value {
+                    !obj.contains_key("address")
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        },
+        "recoveridentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).and_then(|v| v.as_bool()).unwrap_or(false) && check_params(params, &["obj", "bool", "bool", "float", "str"]),
+        "registeridentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).and_then(|v| v.as_bool()).unwrap_or(false) && check_params(params, &["obj", "bool", "float", "str"]),
+        "revokeidentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).and_then(|v| v.as_bool()).unwrap_or(false) && check_params(params, &["str", "bool", "bool", "float", "str"]),
+        "updateidentity" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).and_then(|v| v.as_bool()).unwrap_or(false) && check_params(params, &["obj", "bool", "bool", "float", "str"]),
+        "setidentitytimelock" => params.get(1).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).and_then(|v| v.as_bool()).unwrap_or(false) && check_params(params, &["str", "obj", "bool", "float", "str"]),
+        "sendcurrency" => params.get(4).and_then(|p| serde_json::from_str::<Value>(&p.to_string()).ok()).and_then(|v| v.as_bool()).unwrap_or(false) && check_params(params, &["str", "arr", "int", "float", "bool"]),
         "coinsupply" => check_params(params, &[]),
         "convertpassphrase" => check_params(params, &["str"]),
         "createmultisig" => check_params(params, &["int", "arr"]),
@@ -67,6 +84,7 @@ pub fn is_method_allowed(method: &str, params: &[Box<RawValue>]) -> bool {
         "getchaintips" => check_params(params, &[]),
         "getcurrency" => check_params(params, &["str"]),
         "getcurrencyconverters" => check_params(params, &["str", "str", "str"]),
+        "getcurrencystate" => check_params(params, &["str", "str", "str"]),
         "getcurrencytrust" => check_params(params, &["arr"]),
         "getdifficulty" => check_params(params, &[]),
         "getexports" => check_params(params, &["str", "int", "int"]),
@@ -77,6 +95,7 @@ pub fn is_method_allowed(method: &str, params: &[Box<RawValue>]) -> bool {
         "getidentitieswithrecovery" => check_params(params, &["obj"]),
         "getidentity" => check_params(params, &["str", "int", "bool", "int"]),
         "getidentitytrust" => check_params(params, &["arr"]),
+        "getidentitycontent" => check_params(params, &["str", "int", "int", "bool", "int", "str", "bool"]),
         "getlastimportfrom" => check_params(params, &["str"]),
         "getlaunchinfo" => check_params(params, &["str"]),
         "getmempoolinfo" => check_params(params, &[]),

@@ -1,14 +1,25 @@
-use hyper::{Body, Request, Response, Server, service::{make_service_fn, service_fn}};
+use hyper::{Request, Response, body::Body, StatusCode};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use http_body_util::{BodyExt, Full};
 use serde_json::{Value, json};
 use jsonrpc::{Client, error::RpcError};
 use jsonrpc::simple_http::{self, SimpleHttpTransport};
 use serde_json::value::RawValue;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::net::{SocketAddr, IpAddr};
+use tokio::net::TcpListener;
+use tracing::{info, warn, error, debug};
+use anyhow::{Result, Context, anyhow};
 
 mod allowlist;
 
+// Configuration constants
+const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 50; // 50 MiB
+
 struct VerusRPC {
-    client: Arc<Mutex<Client>>,
+    client: Client,
 }
 
 impl VerusRPC {
@@ -17,20 +28,30 @@ impl VerusRPC {
             .url(url)?
             .auth(user, Some(pass))
             .build();
-        Ok(VerusRPC { client: Arc::new(Mutex::new(Client::with_transport(transport))) })
+        Ok(VerusRPC { client: Client::with_transport(transport) })
     }
 
     fn handle(&self, req_body: Value) -> Result<Value, RpcError> {
         let method = match req_body["method"].as_str() {
             Some(method) => method,
-            None => return Err(RpcError { code: -32602, message: "Invalid method parameter".into(), data: None }),
+            None => {
+                warn!("Missing or invalid method parameter");
+                return Err(RpcError {
+                    code: -32602,
+                    message: "Invalid method parameter".into(),
+                    data: None
+                });
+            }
         };
+
+        debug!("Processing RPC method: {}", method);
+
         let params: Vec<Box<RawValue>> = match req_body["params"].as_array() {
             Some(params) => {
                 params.iter().enumerate().map(|(i, v)| {
                     if method == "getblock" && i == 0 {
                         if let Ok(num) = v.to_string().parse::<i64>() {
-                            // Legacy hack because getblock in JS used to allow 
+                            // Legacy hack because getblock in JS used to allow
                             // strings to be passed in clientside and the former JS rpc server
                             // wouldn't care. This will be deprecated in the future and shouldn't
                             // be relied upon.
@@ -43,106 +64,248 @@ impl VerusRPC {
                     }
                 }).collect()
             },
-            None => return Err(RpcError { code: -32602, message: "Invalid params parameter".into(), data: None }),
+            None => {
+                warn!("Missing or invalid params parameter");
+                return Err(RpcError {
+                    code: -32602,
+                    message: "Invalid params parameter".into(),
+                    data: None
+                });
+            }
         };
-    
-        if !allowlist::is_method_allowed(method, &params) {
-            return Err(RpcError { code: -32601, message: "Method not found".into(), data: None });
-        }
-    
-        let client = self.client.lock().unwrap();
-        let request = client.build_request(method, &params);
 
-        let response = client.send_request(request).map_err(|e| match e {
-            jsonrpc::Error::Rpc(rpc_error) => rpc_error,
-            _ => RpcError { code: -32603, message: "Internal error".into(), data: None },
+        if !allowlist::is_method_allowed(method, &params) {
+            warn!("Method not allowed or invalid parameters: {}", method);
+            return Err(RpcError {
+                code: -32601,
+                message: "Method not found".into(),
+                data: None
+            });
+        }
+
+        let request = self.client.build_request(method, &params);
+
+        let response = self.client.send_request(request).map_err(|e| {
+            error!("RPC request failed: {:?}", e);
+            match e {
+                jsonrpc::Error::Rpc(rpc_error) => rpc_error,
+                _ => RpcError {
+                    code: -32603,
+                    message: "Internal error".into(),
+                    data: None
+                },
+            }
         })?;
-        
-        let result: Value = response.result().map_err(|e| match e {
-            jsonrpc::Error::Rpc(rpc_error) => rpc_error,
-            _ => RpcError { code: -32603, message: "Internal error".into(), data: None },
+
+        let result: Value = response.result().map_err(|e| {
+            error!("RPC response parsing failed: {:?}", e);
+            match e {
+                jsonrpc::Error::Rpc(rpc_error) => rpc_error,
+                _ => RpcError {
+                    code: -32603,
+                    message: "Internal error".into(),
+                    data: None
+                },
+            }
         })?;
+
+        debug!("RPC request successful");
         Ok(result)
     }
 }
 
-async fn handle_req(req: Request<Body>, rpc: Arc<VerusRPC>) -> Result<Response<Body>, hyper::Error> {
+fn add_cors_headers(response: &mut Response<Full<bytes::Bytes>>) {
+    let headers = response.headers_mut();
+    headers.insert(
+        hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        "*".parse().unwrap()
+    );
+    headers.insert(
+        hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
+        "GET, HEAD, PUT, OPTIONS, POST".parse().unwrap()
+    );
+    headers.insert(
+        hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
+        "Content-Type, Authorization, Accept".parse().unwrap()
+    );
+    headers.insert(
+        hyper::header::ACCESS_CONTROL_MAX_AGE,
+        "3600".parse().unwrap()
+    );
+    headers.insert(
+        hyper::header::REFERRER_POLICY,
+        "origin-when-cross-origin".parse().unwrap()
+    );
+}
 
-    // Handle CORS preflight (OPTIONS) request
-    if req.method() == hyper::Method::OPTIONS {
-        let mut response = Response::new(Body::empty());
-        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
-        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST".parse().unwrap());
-        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_HEADERS, "Content-Type, Authorization, Accept".parse().unwrap());
-        response.headers_mut().insert(hyper::header::ACCESS_CONTROL_MAX_AGE, "3600".parse().unwrap());
+async fn handle_req(
+    req: Request<hyper::body::Incoming>,
+    rpc: Arc<VerusRPC>
+) -> Result<Response<Full<bytes::Bytes>>> {
+
+    // Health check endpoint
+    if req.uri().path() == "/health" {
+        debug!("Health check request");
+        let mut response = Response::new(Full::new(bytes::Bytes::from("OK")));
+        add_cors_headers(&mut response);
         return Ok(response);
     }
 
-    // Maximum allowed content length (in bytes)
-    const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 10; // 1 MiB, adjust as needed
+    // Handle CORS preflight (OPTIONS) request
+    if req.method() == hyper::Method::OPTIONS {
+        debug!("CORS preflight request");
+        let mut response = Response::new(Full::new(bytes::Bytes::new()));
+        add_cors_headers(&mut response);
+        return Ok(response);
+    }
 
+    // Check content length
     if let Some(content_length) = req.headers().get(hyper::header::CONTENT_LENGTH) {
-        if let Ok(content_length) = content_length.to_str().unwrap_or("").parse::<u64>() {
-            if content_length > MAX_CONTENT_LENGTH {
-                return Ok(Response::builder()
-                    .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
-                    .body(Body::from("Payload too large"))
-                    .unwrap());
+        if let Ok(content_length_str) = content_length.to_str() {
+            if let Ok(content_length) = content_length_str.parse::<u64>() {
+                if content_length > MAX_CONTENT_LENGTH {
+                    warn!("Payload too large: {} bytes", content_length);
+                    let mut response = Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(Full::new(bytes::Bytes::from("Payload too large")))
+                        .context("Failed to build response")?;
+                    add_cors_headers(&mut response);
+                    return Ok(response);
+                }
             }
         }
     }
-    
-    let whole_body = hyper::body::to_bytes(req.into_body()).await?;
-    let str_body = String::from_utf8(whole_body.to_vec()).unwrap();
+
+    // Read request body
+    let whole_body = req.collect().await
+        .context("Failed to read request body")?
+        .to_bytes();
+
+    let str_body = String::from_utf8(whole_body.to_vec())
+        .context("Request body is not valid UTF-8")?;
+
+    debug!("Received request body");
+
+    // Parse JSON and handle RPC request
     let json_body: Result<Value, _> = serde_json::from_str(&str_body);
     let result = match json_body {
         Ok(req_body) => rpc.handle(req_body),
-        Err(_) => Err(RpcError { code: -32700, message: "Parse error".into(), data: None }),
+        Err(e) => {
+            warn!("JSON parse error: {}", e);
+            Err(RpcError {
+                code: -32700,
+                message: "Parse error".into(),
+                data: None
+            })
+        }
     };
-    // Process the CORS headers
-    let mut response = match result {
-        Ok(res) => Response::new(Body::from(json!({"result": res}).to_string())),
-        Err(err) => Response::new(Body::from(json!({"error": { "code": err.code, "message": err.message }}).to_string())),
+
+    // Build response
+    let body_bytes = match result {
+        Ok(res) => {
+            debug!("Request successful");
+            bytes::Bytes::from(json!({"result": res}).to_string())
+        }
+        Err(err) => {
+            debug!("Request failed with error code: {}", err.code);
+            bytes::Bytes::from(json!({
+                "error": {
+                    "code": err.code,
+                    "message": err.message
+                }
+            }).to_string())
+        }
     };
 
-    // Add CORS headers
-    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
-    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, PUT, OPTIONS, POST".parse().unwrap());
-    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_ALLOW_HEADERS, "Content-Type, Authorization, Accept".parse().unwrap());
-    response.headers_mut().insert(hyper::header::ACCESS_CONTROL_MAX_AGE, "3600".parse().unwrap());
-
-    // Set the Referrer Policy header
-    response.headers_mut().insert(hyper::header::REFERRER_POLICY, "origin-when-cross-origin".parse().unwrap());
-
+    let mut response = Response::new(Full::new(body_bytes));
+    add_cors_headers(&mut response);
     Ok(response)
-
 }
 
 #[tokio::main]
-async fn main() {
-    let mut settings = config::Config::default();
-    
-    settings.merge(config::File::with_name("Conf")).expect("Failed to open configuration file");
+async fn main() -> Result<()> {
+    // Initialize tracing subscriber
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
+        .init();
 
-    let url = settings.get_str("rpc_url").expect("Failed to read 'rpc_url' from configuration");
-    let user = settings.get_str("rpc_user").expect("Failed to read 'rpc_user' from configuration");
-    let password = settings.get_str("rpc_password").expect("Failed to read 'rpc_password' from configuration");
-    
-    let port = settings.get::<u16>("server_port").expect("Failed to read 'server_port' from configuration");
-    let server_addr = settings.get_str("server_addr").expect("Failed to read 'server_addr' from configuration");
+    info!("Starting Rust Verusd RPC Server");
 
-    let addr = (server_addr.parse::<std::net::IpAddr>().unwrap(), port).into();
+    // Load configuration
+    let settings = config::Config::builder()
+        .add_source(config::File::with_name("Conf"))
+        .build()
+        .context("Failed to load configuration file")?;
 
-    let make_svc = make_service_fn(|_conn| {
-        let rpc = Arc::new(VerusRPC::new(&url, &user, &password).unwrap());
-        async {
-            Ok::<_, hyper::Error>(service_fn(move |req| handle_req(req, rpc.clone())))
-        }
-    });
+    // Read and validate configuration
+    let url = settings.get_string("rpc_url")
+        .context("Failed to read 'rpc_url' from configuration")?;
+    let user = settings.get_string("rpc_user")
+        .context("Failed to read 'rpc_user' from configuration")?;
+    let password = settings.get_string("rpc_password")
+        .context("Failed to read 'rpc_password' from configuration")?;
+    let port = settings.get_int("server_port")
+        .context("Failed to read 'server_port' from configuration")?;
+    let server_addr_str = settings.get_string("server_addr")
+        .context("Failed to read 'server_addr' from configuration")?;
 
-    let server = Server::bind(&addr).serve(make_svc);
+    // Validate port range
+    if !(1..=65535).contains(&port) {
+        return Err(anyhow!("Invalid server_port: must be between 1 and 65535"));
+    }
 
-    if let Err(e) = server.await {
-        eprintln!("server error: {}", e);
+    // Parse and validate server address
+    let server_addr = server_addr_str.parse::<IpAddr>()
+        .context("Invalid server_addr: must be a valid IP address")?;
+
+    let addr = SocketAddr::from((server_addr, port as u16));
+
+    info!("Connecting to RPC server at {}", url);
+
+    // Create and validate RPC client
+    let rpc = Arc::new(
+        VerusRPC::new(&url, &user, &password)
+            .context("Failed to create RPC client")?
+    );
+
+    info!("Server listening on {}", addr);
+    info!("Health check available at http://{}/health", addr);
+
+    // Create TCP listener
+    let listener = TcpListener::bind(addr).await
+        .context("Failed to bind to address")?;
+
+    // Accept connections
+    loop {
+        let (stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
+
+        debug!("New connection from {}", remote_addr);
+
+        let io = TokioIo::new(stream);
+        let rpc_clone = Arc::clone(&rpc);
+
+        // Spawn a task to handle the connection
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(io, service_fn(move |req| {
+                    let rpc = Arc::clone(&rpc_clone);
+                    async move {
+                        handle_req(req, rpc).await
+                    }
+                }))
+                .await
+            {
+                error!("Error serving connection from {}: {:?}", remote_addr, err);
+            }
+        });
     }
 }
