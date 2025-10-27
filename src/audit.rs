@@ -21,6 +21,7 @@ impl AuditLogger {
     }
 
     /// Log an RPC request.
+    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_request(&self, event: &RequestEvent) {
         if !self.config.enabled || !self.config.log_requests {
             return;
@@ -38,6 +39,7 @@ impl AuditLogger {
     }
 
     /// Log an RPC response.
+    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_response(&self, event: &ResponseEvent) {
         if !self.config.enabled || !self.config.log_responses {
             return;
@@ -56,6 +58,7 @@ impl AuditLogger {
     }
 
     /// Log an authentication attempt.
+    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_auth(&self, event: &AuthEvent) {
         if !self.config.enabled || !self.config.log_auth {
             return;
@@ -85,6 +88,7 @@ impl AuditLogger {
     }
 
     /// Log a rate limit event.
+    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_rate_limit(&self, event: &RateLimitEvent) {
         if !self.config.enabled || !self.config.log_rate_limits {
             return;
@@ -101,6 +105,7 @@ impl AuditLogger {
     }
 
     /// Log an error event.
+    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_error(&self, event: &ErrorEvent) {
         if !self.config.enabled || !self.config.log_errors {
             return;
@@ -120,6 +125,7 @@ impl AuditLogger {
     }
 
     /// Log a method rejection (allowlist).
+    #[allow(dead_code)] // Infrastructure for comprehensive audit logging
     pub fn log_method_rejection(&self, event: &MethodRejectionEvent) {
         if !self.config.enabled {
             return;
@@ -138,6 +144,7 @@ impl AuditLogger {
 }
 
 /// RPC request event.
+#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct RequestEvent {
     pub request_id: String,
@@ -147,6 +154,7 @@ pub struct RequestEvent {
 }
 
 /// RPC response event.
+#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponseEvent {
     pub request_id: String,
@@ -157,6 +165,7 @@ pub struct ResponseEvent {
 }
 
 /// Authentication event.
+#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthEvent {
     pub request_id: String,
@@ -167,6 +176,7 @@ pub struct AuthEvent {
 }
 
 /// Rate limit event.
+#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct RateLimitEvent {
     pub request_id: String,
@@ -175,6 +185,7 @@ pub struct RateLimitEvent {
 }
 
 /// Error event.
+#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorEvent {
     pub request_id: String,
@@ -186,6 +197,7 @@ pub struct ErrorEvent {
 }
 
 /// Method rejection event.
+#[allow(dead_code)] // Infrastructure for comprehensive audit logging
 #[derive(Debug, Clone, Serialize)]
 pub struct MethodRejectionEvent {
     pub request_id: String,

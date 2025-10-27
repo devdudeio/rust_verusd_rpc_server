@@ -57,6 +57,7 @@ pub struct ServerConfiguration {
     /// Response caching configuration.
     pub cache: CacheConfig,
     /// Upstream RPC connection configuration.
+    #[allow(dead_code)] // Infrastructure for future connection pool management
     pub upstream: UpstreamConfig,
 }
 

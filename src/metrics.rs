@@ -196,10 +196,12 @@ pub fn gather() -> Result<String, anyhow::Error> {
 }
 
 /// Helper for timing operations.
+#[allow(dead_code)] // Utility for future timing instrumentation
 pub struct Timer {
     start: Instant,
 }
 
+#[allow(dead_code)]
 impl Timer {
     /// Start a new timer.
     pub fn new() -> Self {

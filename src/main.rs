@@ -206,6 +206,7 @@ struct ServerConfig {
     audit_logger: audit::AuditLogger,
 
     /// Response cache for frequently requested data.
+    #[allow(dead_code)] // Infrastructure ready for future integration
     cache: Option<cache::ResponseCache>,
 
     /// Advanced rate limiter with per-method limits.
@@ -857,49 +858,51 @@ async fn handle_req(
         .map(|s| s.to_string());
 
     // Check IP filter (except for health/metrics endpoints)
-    if path != "/health" && path != "/ready" && path != "/metrics" {
-        if !server_config.ip_filter.is_allowed(client_ip) {
-            let denial_reason = server_config
-                .ip_filter
-                .denial_reason(client_ip)
-                .unwrap_or_else(|| "IP not allowed".to_string());
-            warn!("IP {} denied: {}", client_ip, denial_reason);
+    if path != "/health"
+        && path != "/ready"
+        && path != "/metrics"
+        && !server_config.ip_filter.is_allowed(client_ip)
+    {
+        let denial_reason = server_config
+            .ip_filter
+            .denial_reason(client_ip)
+            .unwrap_or_else(|| "IP not allowed".to_string());
+        warn!("IP {} denied: {}", client_ip, denial_reason);
 
-            // Log IP denial
-            server_config.audit_logger.log_auth(&audit::AuthEvent {
-                request_id: request_id.clone(),
-                client_ip,
-                success: false,
-                key_name: None,
-                failure_reason: Some(denial_reason.clone()),
-            });
+        // Log IP denial
+        server_config.audit_logger.log_auth(&audit::AuthEvent {
+            request_id: request_id.clone(),
+            client_ip,
+            success: false,
+            key_name: None,
+            failure_reason: Some(denial_reason.clone()),
+        });
 
-            let mut response = Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .body(Full::new(bytes::Bytes::from(
-                    json!({
-                        "error": {
-                            "code": -32002,
-                            "message": format!("Access denied: {}", denial_reason),
-                            "request_id": request_id
-                        }
-                    })
-                    .to_string(),
-                )))
-                .context("Failed to build IP denial response")?;
-            response.headers_mut().insert(
-                "X-Request-ID",
-                request_id
-                    .parse()
-                    .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
-            );
-            add_cors_and_security_headers(
-                &mut response,
-                &server_config.cors_origins,
-                request_origin.as_ref(),
-            );
-            return Ok(response);
-        }
+        let mut response = Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Full::new(bytes::Bytes::from(
+                json!({
+                    "error": {
+                        "code": -32002,
+                        "message": format!("Access denied: {}", denial_reason),
+                        "request_id": request_id
+                    }
+                })
+                .to_string(),
+            )))
+            .context("Failed to build IP denial response")?;
+        response.headers_mut().insert(
+            "X-Request-ID",
+            request_id
+                .parse()
+                .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown")),
+        );
+        add_cors_and_security_headers(
+            &mut response,
+            &server_config.cors_origins,
+            request_origin.as_ref(),
+        );
+        return Ok(response);
     }
 
     // Check API key authentication
