@@ -55,6 +55,7 @@ mod allowlist;
 mod allowlist_config;
 mod audit;
 mod cache;
+mod circuit_breaker;
 mod config;
 mod config_types;
 mod ip_filter;
