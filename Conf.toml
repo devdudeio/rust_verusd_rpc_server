@@ -29,3 +29,10 @@ server_addr = "ADDRESS_TO_BIND_TO"
 # Otherwise, it will use HTTP (not recommended for production)
 # tls_cert_path = "/path/to/cert.pem"
 # tls_key_path = "/path/to/key.pem"
+
+# Response cache configuration (optional)
+# TTL for cached responses in seconds (defaults to 60)
+# Only applies to read-only RPC methods
+# cache_ttl_seconds = 60
+# Maximum number of cached items (defaults to 1000)
+# cache_max_capacity = 1000
