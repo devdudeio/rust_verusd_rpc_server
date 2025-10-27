@@ -7,3 +7,9 @@ server_addr = "ADDRESS_TO_BIND_TO"
 
 # Request timeout in seconds (optional, defaults to 30)
 # request_timeout = 30
+
+# Rate limiting configuration (optional)
+# Maximum requests per IP per minute (defaults to 60)
+# rate_limit_per_minute = 60
+# Maximum burst size (defaults to 10)
+# rate_limit_burst = 10

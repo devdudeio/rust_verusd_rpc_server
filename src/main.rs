@@ -10,16 +10,26 @@ use serde_json::value::RawValue;
 use std::sync::Arc;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
+use std::num::NonZeroU32;
 use tokio::net::TcpListener;
 use tracing::{info, warn, error, debug, Span};
 use anyhow::{Result, Context, anyhow};
 use uuid::Uuid;
+use governor::{Quota, RateLimiter, Jitter};
+use governor::state::{InMemoryState, NotKeyed};
+use governor::clock::DefaultClock;
+use dashmap::DashMap;
 
 mod allowlist;
 
 // Configuration constants
 const MAX_CONTENT_LENGTH: u64 = 1024 * 1024 * 50; // 50 MiB
 const DEFAULT_REQUEST_TIMEOUT: u64 = 30; // seconds
+const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 60;
+const DEFAULT_RATE_LIMIT_BURST: u32 = 10;
+
+// Per-IP rate limiter
+type IpRateLimiter = RateLimiter<IpAddr, DashMap<IpAddr, InMemoryState>, DefaultClock>;
 
 struct VerusRPC {
     client: Client,
@@ -221,14 +231,48 @@ fn add_cors_and_security_headers(response: &mut Response<Full<bytes::Bytes>>) {
 
 async fn handle_req(
     req: Request<hyper::body::Incoming>,
-    rpc: Arc<VerusRPC>
+    rpc: Arc<VerusRPC>,
+    rate_limiter: Arc<IpRateLimiter>,
+    client_ip: IpAddr
 ) -> Result<Response<Full<bytes::Bytes>>> {
     // Generate request ID for correlation
     let request_id = Uuid::new_v4().to_string();
-    let span = tracing::info_span!("request", request_id = %request_id);
+    let span = tracing::info_span!("request", request_id = %request_id, client_ip = %client_ip);
     let _enter = span.enter();
 
     info!("Incoming {} request to {}", req.method(), req.uri().path());
+
+    // Check rate limit for this IP (skip health checks)
+    if req.uri().path() != "/health" {
+        match rate_limiter.check_key(&client_ip) {
+            Ok(_) => {
+                debug!("Rate limit check passed for IP {}", client_ip);
+            }
+            Err(_) => {
+                warn!("Rate limit exceeded for IP {}", client_ip);
+                let mut response = Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .body(Full::new(bytes::Bytes::from(json!({
+                        "error": {
+                            "code": -32005,
+                            "message": "Rate limit exceeded. Please try again later.",
+                            "request_id": &request_id
+                        }
+                    }).to_string())))
+                    .context("Failed to build rate limit response")?;
+                response.headers_mut().insert(
+                    "X-Request-ID",
+                    request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                );
+                response.headers_mut().insert(
+                    "Retry-After",
+                    hyper::header::HeaderValue::from_static("60")
+                );
+                add_cors_and_security_headers(&mut response);
+                return Ok(response);
+            }
+        }
+    }
 
     // Health check endpoint
     if req.uri().path() == "/health" {
@@ -457,6 +501,12 @@ async fn main() -> Result<()> {
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT as i64);
     let timeout = Duration::from_secs(timeout_secs as u64);
 
+    // Read rate limiting configuration
+    let rate_limit_per_minute = settings.get_int("rate_limit_per_minute")
+        .unwrap_or(DEFAULT_RATE_LIMIT_PER_MINUTE as i64) as u32;
+    let rate_limit_burst = settings.get_int("rate_limit_burst")
+        .unwrap_or(DEFAULT_RATE_LIMIT_BURST as i64) as u32;
+
     let addr = SocketAddr::from((server_addr, port as u16));
 
     info!("Connecting to RPC server at {}", url);
@@ -468,8 +518,19 @@ async fn main() -> Result<()> {
             .context("Failed to create RPC client")?
     );
 
+    // Create rate limiter
+    let quota = Quota::per_minute(
+        NonZeroU32::new(rate_limit_per_minute)
+            .context("rate_limit_per_minute must be greater than 0")?
+    ).allow_burst(
+        NonZeroU32::new(rate_limit_burst)
+            .context("rate_limit_burst must be greater than 0")?
+    );
+    let rate_limiter = Arc::new(RateLimiter::dashmap(quota));
+
     info!("Server listening on {}", addr);
     info!("Health check available at http://{}/health", addr);
+    info!("Rate limiting: {} requests/minute with burst of {}", rate_limit_per_minute, rate_limit_burst);
 
     // Create TCP listener
     let listener = TcpListener::bind(addr).await
@@ -519,14 +580,17 @@ async fn main() -> Result<()> {
 
             let io = TokioIo::new(stream);
             let rpc_clone = Arc::clone(&rpc);
+            let rate_limiter_clone = Arc::clone(&rate_limiter);
+            let client_ip = remote_addr.ip();
 
             // Spawn a task to handle the connection
             tokio::task::spawn(async move {
                 if let Err(err) = http1::Builder::new()
                     .serve_connection(io, service_fn(move |req| {
                         let rpc = Arc::clone(&rpc_clone);
+                        let rate_limiter = Arc::clone(&rate_limiter_clone);
                         async move {
-                            handle_req(req, rpc).await
+                            handle_req(req, rpc, rate_limiter, client_ip).await
                         }
                     }))
                     .await
