@@ -460,6 +460,45 @@ impl VerusRPC {
     }
 }
 
+/// Validates an API key using constant-time comparison to prevent timing attacks.
+///
+/// # Arguments
+///
+/// * `provided_key` - The API key provided by the client
+/// * `valid_keys` - Set of valid API keys
+///
+/// # Returns
+///
+/// * `true` if the provided key matches any valid key
+/// * `false` otherwise
+///
+/// # Security
+///
+/// This function uses constant-time comparison to prevent timing attacks that
+/// could leak information about valid API keys. For each byte position, the
+/// function compares all keys at that position before moving to the next byte,
+/// ensuring the execution time depends only on key length, not key content.
+fn validate_api_key(provided_key: &str, valid_keys: &HashSet<String>) -> bool {
+    // Use constant-time comparison for each valid key
+    valid_keys.iter().any(|valid_key| {
+        // First check lengths match (this is safe to short-circuit)
+        if provided_key.len() != valid_key.len() {
+            return false;
+        }
+
+        // Constant-time comparison of bytes
+        let provided_bytes = provided_key.as_bytes();
+        let valid_bytes = valid_key.as_bytes();
+
+        let mut result = 0u8;
+        for i in 0..provided_bytes.len() {
+            result |= provided_bytes[i] ^ valid_bytes[i];
+        }
+
+        result == 0
+    })
+}
+
 /// Checks API key authentication for a request.
 ///
 /// # Arguments
@@ -498,7 +537,7 @@ fn check_authentication(
             });
 
         match provided_key {
-            Some(key) if api_keys.contains(key) => {
+            Some(key) if validate_api_key(key, api_keys) => {
                 debug!("API key authentication successful");
                 Ok(())
             }
