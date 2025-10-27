@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
 use std::num::NonZeroU32;
+use std::collections::HashSet;
 use tokio::net::TcpListener;
 use tracing::{info, warn, error, debug, Span};
 use anyhow::{Result, Context, anyhow};
@@ -30,6 +31,11 @@ const DEFAULT_RATE_LIMIT_BURST: u32 = 10;
 
 // Per-IP rate limiter
 type IpRateLimiter = RateLimiter<IpAddr, DashMap<IpAddr, InMemoryState>, DefaultClock>;
+
+struct ServerConfig {
+    api_keys: Option<HashSet<String>>,
+    cors_origins: Vec<String>,
+}
 
 struct VerusRPC {
     client: Client,
@@ -180,31 +186,57 @@ impl VerusRPC {
     }
 }
 
-fn add_cors_and_security_headers(response: &mut Response<Full<bytes::Bytes>>) {
+fn add_cors_and_security_headers(
+    response: &mut Response<Full<bytes::Bytes>>,
+    cors_origins: &[String],
+    request_origin: Option<&str>
+) {
     use hyper::header::HeaderValue;
     let headers = response.headers_mut();
 
-    // CORS headers
-    headers.insert(
-        hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+    // CORS headers - set origin based on configuration
+    let allowed_origin = if cors_origins.len() == 1 && cors_origins[0] == "*" {
+        // Allow all origins
         HeaderValue::from_static("*")
-    );
-    headers.insert(
-        hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, HEAD, PUT, OPTIONS, POST")
-    );
-    headers.insert(
-        hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Content-Type, Authorization, Accept, X-Request-ID")
-    );
-    headers.insert(
-        hyper::header::ACCESS_CONTROL_MAX_AGE,
-        HeaderValue::from_static("3600")
-    );
-    headers.insert(
-        hyper::header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("X-Request-ID")
-    );
+    } else if let Some(origin) = request_origin {
+        // Check if request origin is in allowed list
+        if cors_origins.iter().any(|allowed| allowed == origin) {
+            HeaderValue::from_str(origin).unwrap_or_else(|_| HeaderValue::from_static("*"))
+        } else {
+            // Origin not allowed, don't set CORS headers
+            HeaderValue::from_static("")
+        }
+    } else {
+        // No origin in request, use first allowed or deny
+        if !cors_origins.is_empty() {
+            HeaderValue::from_str(&cors_origins[0]).unwrap_or_else(|_| HeaderValue::from_static("*"))
+        } else {
+            HeaderValue::from_static("*")
+        }
+    };
+
+    if !allowed_origin.is_empty() {
+        headers.insert(
+            hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            allowed_origin
+        );
+        headers.insert(
+            hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, HEAD, PUT, OPTIONS, POST")
+        );
+        headers.insert(
+            hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Content-Type, Authorization, Accept, X-Request-ID, X-API-Key")
+        );
+        headers.insert(
+            hyper::header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("3600")
+        );
+        headers.insert(
+            hyper::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static("X-Request-ID")
+        );
+    }
 
     // Security headers
     headers.insert(
@@ -233,7 +265,8 @@ async fn handle_req(
     req: Request<hyper::body::Incoming>,
     rpc: Arc<VerusRPC>,
     rate_limiter: Arc<IpRateLimiter>,
-    client_ip: IpAddr
+    client_ip: IpAddr,
+    server_config: Arc<ServerConfig>
 ) -> Result<Response<Full<bytes::Bytes>>> {
     // Generate request ID for correlation
     let request_id = Uuid::new_v4().to_string();
@@ -241,6 +274,77 @@ async fn handle_req(
     let _enter = span.enter();
 
     info!("Incoming {} request to {}", req.method(), req.uri().path());
+
+    // Extract Origin header for CORS
+    let request_origin = req.headers()
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+
+    // Check API key authentication (skip health checks)
+    if req.uri().path() != "/health" {
+        if let Some(ref api_keys) = server_config.api_keys {
+            // Extract API key from headers (X-API-Key or Authorization: Bearer)
+            let provided_key = req.headers()
+                .get("X-API-Key")
+                .and_then(|v| v.to_str().ok())
+                .or_else(|| {
+                    req.headers()
+                        .get(hyper::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|auth| {
+                            if auth.starts_with("Bearer ") {
+                                Some(&auth[7..])
+                            } else {
+                                None
+                            }
+                        })
+                });
+
+            match provided_key {
+                Some(key) if api_keys.contains(key) => {
+                    debug!("API key authentication successful");
+                }
+                Some(_) => {
+                    warn!("Invalid API key provided");
+                    let mut response = Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Full::new(bytes::Bytes::from(json!({
+                            "error": {
+                                "code": -32001,
+                                "message": "Invalid API key",
+                                "request_id": &request_id
+                            }
+                        }).to_string())))
+                        .context("Failed to build authentication error response")?;
+                    response.headers_mut().insert(
+                        "X-Request-ID",
+                        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                    );
+                    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+                    return Ok(response);
+                }
+                None => {
+                    warn!("Missing API key");
+                    let mut response = Response::builder()
+                        .status(StatusCode::UNAUTHORIZED)
+                        .body(Full::new(bytes::Bytes::from(json!({
+                            "error": {
+                                "code": -32001,
+                                "message": "API key required. Provide via X-API-Key header or Authorization: Bearer token",
+                                "request_id": &request_id
+                            }
+                        }).to_string())))
+                        .context("Failed to build authentication error response")?;
+                    response.headers_mut().insert(
+                        "X-Request-ID",
+                        request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
+                    );
+                    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
+                    return Ok(response);
+                }
+            }
+        }
+    }
 
     // Check rate limit for this IP (skip health checks)
     if req.uri().path() != "/health" {
@@ -268,7 +372,7 @@ async fn handle_req(
                     "Retry-After",
                     hyper::header::HeaderValue::from_static("60")
                 );
-                add_cors_and_security_headers(&mut response);
+                add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
                 return Ok(response);
             }
         }
@@ -295,7 +399,7 @@ async fn handle_req(
             "X-Request-ID",
             request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
         );
-        add_cors_and_security_headers(&mut response);
+        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
         return Ok(response);
     }
 
@@ -307,7 +411,7 @@ async fn handle_req(
             "X-Request-ID",
             request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
         );
-        add_cors_and_security_headers(&mut response);
+        add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
         return Ok(response);
     }
 
@@ -331,7 +435,7 @@ async fn handle_req(
                     "X-Request-ID",
                     request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
                 );
-                add_cors_and_security_headers(&mut response);
+                add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
                 return Ok(response);
             }
             None => {
@@ -344,7 +448,7 @@ async fn handle_req(
                     "X-Request-ID",
                     request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
                 );
-                add_cors_and_security_headers(&mut response);
+                add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
                 return Ok(response);
             }
         }
@@ -364,7 +468,7 @@ async fn handle_req(
                         "X-Request-ID",
                         request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
                     );
-                    add_cors_and_security_headers(&mut response);
+                    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
                     return Ok(response);
                 }
             }
@@ -418,7 +522,7 @@ async fn handle_req(
         "X-Request-ID",
         request_id.parse().unwrap_or_else(|_| hyper::header::HeaderValue::from_static("unknown"))
     );
-    add_cors_and_security_headers(&mut response);
+    add_cors_and_security_headers(&mut response, &server_config.cors_origins, request_origin);
     Ok(response)
 }
 
@@ -507,6 +611,32 @@ async fn main() -> Result<()> {
     let rate_limit_burst = settings.get_int("rate_limit_burst")
         .unwrap_or(DEFAULT_RATE_LIMIT_BURST as i64) as u32;
 
+    // Read API keys configuration
+    let api_keys = settings.get_string("api_keys").ok()
+        .map(|keys_str| {
+            keys_str.split(',')
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect::<HashSet<String>>()
+        })
+        .filter(|keys: &HashSet<String>| !keys.is_empty());
+
+    // Read CORS origins configuration
+    let cors_origins = settings.get_string("cors_allowed_origins")
+        .ok()
+        .map(|origins_str| {
+            origins_str.split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_else(|| vec!["*".to_string()]);
+
+    let server_config = Arc::new(ServerConfig {
+        api_keys: api_keys.clone(),
+        cors_origins: cors_origins.clone(),
+    });
+
     let addr = SocketAddr::from((server_addr, port as u16));
 
     info!("Connecting to RPC server at {}", url);
@@ -531,6 +661,18 @@ async fn main() -> Result<()> {
     info!("Server listening on {}", addr);
     info!("Health check available at http://{}/health", addr);
     info!("Rate limiting: {} requests/minute with burst of {}", rate_limit_per_minute, rate_limit_burst);
+
+    if api_keys.is_some() {
+        info!("API key authentication: ENABLED");
+    } else {
+        warn!("API key authentication: DISABLED (not recommended for production)");
+    }
+
+    if cors_origins.len() == 1 && cors_origins[0] == "*" {
+        warn!("CORS: Allowing all origins (not recommended for production)");
+    } else {
+        info!("CORS: Allowing origins: {:?}", cors_origins);
+    }
 
     // Create TCP listener
     let listener = TcpListener::bind(addr).await
@@ -581,6 +723,7 @@ async fn main() -> Result<()> {
             let io = TokioIo::new(stream);
             let rpc_clone = Arc::clone(&rpc);
             let rate_limiter_clone = Arc::clone(&rate_limiter);
+            let server_config_clone = Arc::clone(&server_config);
             let client_ip = remote_addr.ip();
 
             // Spawn a task to handle the connection
@@ -589,8 +732,9 @@ async fn main() -> Result<()> {
                     .serve_connection(io, service_fn(move |req| {
                         let rpc = Arc::clone(&rpc_clone);
                         let rate_limiter = Arc::clone(&rate_limiter_clone);
+                        let server_config = Arc::clone(&server_config_clone);
                         async move {
-                            handle_req(req, rpc, rate_limiter, client_ip).await
+                            handle_req(req, rpc, rate_limiter, client_ip, server_config).await
                         }
                     }))
                     .await
