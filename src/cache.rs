@@ -56,8 +56,9 @@ pub struct ResponseCache {
 impl ResponseCache {
     /// Create a new response cache from configuration.
     pub fn new(config: &CacheConfig) -> Self {
-        let capacity =
-            NonZeroUsize::new(config.max_entries).unwrap_or(NonZeroUsize::new(1).unwrap());
+        let capacity = NonZeroUsize::new(config.max_entries).unwrap_or_else(|| {
+            NonZeroUsize::new(1).expect("1 is non-zero, this should never fail")
+        });
 
         let cacheable_methods: HashMap<String, bool> =
             config.methods.iter().map(|m| (m.clone(), true)).collect();

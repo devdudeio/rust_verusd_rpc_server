@@ -100,10 +100,17 @@ impl AdvancedRateLimiter {
         if !self.method_limiters.contains_key(method) {
             // Use the method's limit as the burst capacity to prevent
             // burst capacity from exceeding the rate limit
-            let burst = limit.max(1);
-            let quota =
-                Quota::per_minute(NonZeroU32::new(limit).unwrap_or(NonZeroU32::new(1).unwrap()))
-                    .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::new(1).unwrap()));
+            // Ensure limit and burst are at least 1
+            let limit = limit.max(1);
+            let burst = limit;
+            let quota = Quota::per_minute(
+                NonZeroU32::new(limit)
+                    .expect("limit.max(1) ensures value is non-zero"),
+            )
+            .allow_burst(
+                NonZeroU32::new(burst)
+                    .expect("burst=limit.max(1) ensures value is non-zero"),
+            );
 
             self.method_limiters
                 .insert(method.to_string(), RateLimiter::dashmap(quota));

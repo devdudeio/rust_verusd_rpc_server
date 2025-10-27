@@ -1,6 +1,6 @@
 rpc_url = "http://localhost:27486"
-rpc_user = "testuser"
-rpc_password = "testpassword"
+rpc_user = "your_rpc_username"  # Replace with your Verus RPC username
+rpc_password = "your_rpc_password_here"  # At least 12 characters, replace with secure password
 
 server_port = 8080
 server_addr = "127.0.0.1"
@@ -17,7 +17,8 @@ server_addr = "127.0.0.1"
 # API key authentication (optional)
 # Comma-separated list of valid API keys
 # If not set, authentication is disabled (not recommended for production)
-# api_keys = "key1,key2,key3"
+# Use strong random keys (minimum 16 characters). Generate with: openssl rand -hex 32
+# api_keys = "your-secret-api-key-1,your-secret-api-key-2"
 
 # CORS configuration (optional)
 # Comma-separated list of allowed origins (defaults to "*")
@@ -63,14 +64,15 @@ endpoint = "/metrics"
 
 # Per-API-key configuration (optional, advanced)
 # Allows different permission levels and rate limits per key
+# Generate secure keys with: openssl rand -hex 32
 # [[api_key]]
-# key = "admin-key-here"
+# key = "your-admin-api-key-here-minimum-16-chars"
 # name = "Admin Key"
 # methods_preset = "full"
 # rate_limit_per_minute = 1000
 
 # [[api_key]]
-# key = "readonly-key-here"
+# key = "your-readonly-api-key-here-minimum-16-chars"
 # name = "Read Only Key"
 # methods_preset = "minimal"
 # rate_limit_per_minute = 60
