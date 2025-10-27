@@ -1,11 +1,16 @@
 [package]
 name = "rust_verusd_rpc_server"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
-hyper = { version = "0.14", features = ["full"] }
+hyper = { version = "1.5", features = ["full", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0"
-jsonrpc = "0.12"
-config = "0.10.1"
+jsonrpc = "0.18"
+config = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
