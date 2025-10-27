@@ -24,8 +24,4 @@ server_addr = "127.0.0.1"
 # For production, specify exact origins like "https://example.com,https://app.example.com"
 # cors_allowed_origins = "*"
 
-# TLS/HTTPS configuration (optional)
-# If both cert_path and key_path are provided, server will use HTTPS
-# Otherwise, it will use HTTP (not recommended for production)
-# tls_cert_path = "/path/to/cert.pem"
-# tls_key_path = "/path/to/key.pem"
+# Note: For TLS/HTTPS, use a reverse proxy like Caddy or nginx

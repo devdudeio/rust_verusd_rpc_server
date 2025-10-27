@@ -7,7 +7,7 @@ A high-performance, secure RPC proxy server for Verus blockchain nodes written i
 ### Security
 - **API Key Authentication**: Protect your RPC endpoint with multiple API keys
 - **Rate Limiting**: Per-IP rate limiting to prevent DDoS attacks (60 req/min default)
-- **TLS/HTTPS Support**: Encrypt traffic with SSL/TLS certificates
+- **Reverse Proxy Ready**: Designed to work behind Caddy/nginx for HTTPS termination
 - **Configurable CORS**: Control which origins can access your API
 - **Input Validation**: Strict parameter validation to prevent injection attacks
 - **Method Allowlist**: Only approved RPC methods are forwarded
@@ -98,10 +98,8 @@ api_keys = "secret-key-1,secret-key-2,secret-key-3"
 # For production, specify exact origins
 cors_allowed_origins = "https://example.com,https://app.example.com"
 
-# Optional: TLS/HTTPS configuration
-# If both are provided, server will use HTTPS
-tls_cert_path = "/path/to/cert.pem"
-tls_key_path = "/path/to/key.pem"
+# Note: For HTTPS, use Caddy or nginx as a reverse proxy
+# See the "HTTPS with Caddy" section below
 ```
 
 ### Environment Variables
@@ -122,8 +120,6 @@ export VERUS_RPC_RATE_LIMIT_PER_MINUTE="60"
 export VERUS_RPC_RATE_LIMIT_BURST="10"
 export VERUS_RPC_API_KEYS="key1,key2,key3"
 export VERUS_RPC_CORS_ALLOWED_ORIGINS="https://example.com"
-export VERUS_RPC_TLS_CERT_PATH="/path/to/cert.pem"
-export VERUS_RPC_TLS_KEY_PATH="/path/to/key.pem"
 ```
 
 **Note:** Environment variables override values in `Conf.toml`.
@@ -240,26 +236,114 @@ Run with:
 docker-compose up -d
 ```
 
-### Production Docker Deployment
+## HTTPS with Caddy
 
-For production with HTTPS:
+For production deployments, use [Caddy](https://caddyserver.com/) as a reverse proxy to handle HTTPS. Caddy automatically obtains and renews Let's Encrypt certificates.
+
+### Installing Caddy
 
 ```bash
-docker run -d \
-  --name verus-rpc-server \
-  -p 443:8080 \
-  -v /path/to/certs:/certs:ro \
-  -e VERUS_RPC_RPC_URL=http://verusd:27486 \
-  -e VERUS_RPC_RPC_USER=username \
-  -e VERUS_RPC_RPC_PASSWORD=password \
-  -e VERUS_RPC_SERVER_PORT=8080 \
-  -e VERUS_RPC_SERVER_ADDR=0.0.0.0 \
-  -e VERUS_RPC_API_KEYS="key1,key2,key3" \
-  -e VERUS_RPC_TLS_CERT_PATH=/certs/cert.pem \
-  -e VERUS_RPC_TLS_KEY_PATH=/certs/key.pem \
-  -e VERUS_RPC_CORS_ALLOWED_ORIGINS="https://yourdomain.com" \
-  --restart unless-stopped \
-  rust_verusd_rpc_server
+# Ubuntu/Debian
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install caddy
+```
+
+### Configure Caddy
+
+Create or edit `/etc/caddy/Caddyfile`:
+
+```caddyfile
+# Replace with your domain
+your-domain.com {
+    # Automatic HTTPS with Let's Encrypt
+
+    # Reverse proxy to Rust RPC server
+    reverse_proxy localhost:8080 {
+        # Health check
+        health_uri /health
+        health_interval 10s
+        health_timeout 5s
+
+        # Forward real IP
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Additional security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        -Server
+    }
+
+    # Logging
+    log {
+        output file /var/log/caddy/verus-rpc.log
+        format json
+    }
+}
+```
+
+### Start Caddy
+
+```bash
+# Reload Caddy configuration
+sudo systemctl reload caddy
+
+# Check status
+sudo systemctl status caddy
+
+# View logs
+sudo journalctl -u caddy -f
+```
+
+### Docker Compose with Caddy
+
+Create a complete `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  rpc-server:
+    image: rust_verusd_rpc_server
+    expose:
+      - "8080"
+    environment:
+      VERUS_RPC_RPC_URL: "http://verusd:27486"
+      VERUS_RPC_RPC_USER: "username"
+      VERUS_RPC_RPC_PASSWORD: "password"
+      VERUS_RPC_SERVER_PORT: "8080"
+      VERUS_RPC_SERVER_ADDR: "0.0.0.0"
+      VERUS_RPC_API_KEYS: "your-secret-key"
+      VERUS_RPC_CORS_ALLOWED_ORIGINS: "https://yourdomain.com"
+    restart: unless-stopped
+    networks:
+      - verus-network
+
+  caddy:
+    image: caddy:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks:
+      - verus-network
+
+networks:
+  verus-network:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
 ```
 
 ## Security Best Practices
@@ -267,26 +351,14 @@ docker run -d \
 ### Production Checklist
 
 - [ ] **Enable API Key Authentication**: Set `api_keys` with strong, random keys
-- [ ] **Enable TLS/HTTPS**: Provide valid certificate and key files
+- [ ] **Deploy Behind Caddy/nginx**: Use reverse proxy for HTTPS with automatic certificates
 - [ ] **Configure CORS**: Specify exact allowed origins (not `"*"`)
 - [ ] **Adjust Rate Limits**: Set appropriate limits for your use case
 - [ ] **Use Environment Variables**: Don't commit `Conf.toml` with secrets
 - [ ] **Run as Non-Root**: The Docker image uses a non-root user by default
 - [ ] **Monitor Logs**: Set up log aggregation for security monitoring
 - [ ] **Keep Updated**: Regularly update to get security patches
-
-### Generating TLS Certificates
-
-For testing, generate self-signed certificates:
-
-```bash
-openssl req -x509 -newkey rsa:4096 \
-  -keyout key.pem -out cert.pem \
-  -days 365 -nodes \
-  -subj "/CN=localhost"
-```
-
-For production, use [Let's Encrypt](https://letsencrypt.org/) or your certificate provider.
+- [ ] **Configure Firewall**: Only expose Caddy (port 80/443), keep RPC server internal
 
 ### API Key Management
 
@@ -410,16 +482,13 @@ If you see `429 Too Many Requests`:
 - Check if legitimate traffic is being rate limited
 - Consider implementing per-API-key rate limits
 
-### TLS/Certificate errors
+### HTTPS/Certificate issues
 
-**Verify certificate files:**
-```bash
-# Check certificate validity
-openssl x509 -in cert.pem -text -noout
-
-# Check private key
-openssl rsa -in key.pem -check
-```
+If using Caddy:
+- Check Caddy logs: `sudo journalctl -u caddy -f`
+- Verify domain DNS points to your server
+- Ensure ports 80 and 443 are open
+- Check Caddy configuration: `caddy validate --config /etc/caddy/Caddyfile`
 
 ### High memory usage
 
