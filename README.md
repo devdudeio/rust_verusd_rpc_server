@@ -75,8 +75,8 @@ Create a `Conf.toml` file in the project root:
 ```toml
 # Required: Upstream Verus RPC connection
 rpc_url = "http://localhost:27486"
-rpc_user = "your_rpc_username"
-rpc_password = "your_rpc_password"
+rpc_user = "yourusername"
+rpc_password = "yourpassword"
 
 # Required: Server binding
 server_port = 8080
